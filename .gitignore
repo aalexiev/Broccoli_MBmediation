@@ -2,4 +2,5 @@
 .RData
 *.RData
 .Rhistory
+.gitignore
 
