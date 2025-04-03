@@ -1,0 +1,259 @@
+---
+title: "Broccoli flipped mediation structure"
+author: "Alexandra Alexiev"
+date: "2024-08-30"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+# knit options for whole doc. I will add in specific chunks when I don't want this to be the case
+knitr::opts_chunk$set(echo = TRUE, # show code
+                      eval = TRUE, # run chunks when knitting
+                      include = TRUE, # include chunk input in final doc
+                      warning = FALSE, # do not show warnings in final doc
+                      message = FALSE, # do not show messages from code in final doc
+                      collapse = TRUE, # when possible, do put multiple outputs in one block
+                      dpi = 300, # fig resolution
+                      fig.dim = c(9, 5), # the default figure dimensions
+                      out.width = "98%", # the default figure output width
+                      out.height = "98%", # the default figure output height 
+                      cache = TRUE) # dont rerun chunks that haven't been changed
+
+```
+
+## libraries and directories
+
+```{r libraries}
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(ggplot2)
+library(vegan)
+library(mediation)
+library(ggfortify)
+library(ggpubr)
+set.seed(3)
+
+```
+
+
+```{r set working dir, eval=F}
+setwd("/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/brocc_mediation_Rfiles/flipped_mediation/")
+
+load("/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/brocc_mediation_Rfiles/flipped_mediation/brocc_flipmed.RData")
+
+```
+
+## Input data
+- 0 hrs microbiome data, Genus level data, broccoli eaters only
+```{r microbiome data}
+# ASV table (ASV reads per sample)
+SFN_taxa <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/input_data/SFN_taxa_flipped.txt", header = T) 
+# filter so only the taxa above that Yanni previously found were associated with SFN will be used
+MB_asvtab <- read.table("/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/input_data/MBasvtab_brocc_cleanT0.txt",
+                      header = TRUE) %>%
+  dplyr::select(SFN_taxa$x)
+
+# metadata for microbiome stuff
+metadata <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/Microbiome_Flat/SampleData_BSS.csv",
+                      header = TRUE) %>%
+  dplyr::filter(time == 0 & veg == "broc") # for now just Time 0 data
+
+```
+
+- Urine SFN data at time 24 hrs, only broccoli eaters
+```{r urine SFN data}
+## SFN data
+Urine_SFN <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/SFN_Data/Urine_R_Format.csv",
+                      header = TRUE) %>%
+  dplyr::filter(subject_id %in% metadata$subject_id) %>%
+  group_by(subject_id) %>%
+  summarise(sum_SFN = sum(SFN),
+            sum_SFN_Cys = sum(SFN_Cys),
+            sum_SFN_NAC = sum(SFN_NAC),
+            sum_SFN_CG = sum(SFN_CG),
+            sum_SFN_GSH = sum(SFN_GSH),
+            sum_SFN_NIT = sum(SFN_NIT),
+            sum_SFN_Tot = sum(SFN_Tot))
+
+# make a mega metadata file
+mega_meta <- inner_join(metadata, Urine_SFN, by = "subject_id")
+mega_meta <- mega_meta[order(mega_meta$subject_id),]
+
+# same order?
+rownames(MB_asvtab) == mega_meta$subject_id
+
+```
+
+- add diet data
+```{r diet data}
+## diet data
+# make a list of the "significant" diet factors we are interested in 
+diet_compnts <- c("diet_Chol_mg", "diet_SatFat_g", "diet_Alc_g", "diet_TotSolFib_g", 
+                  "diet_MonSac_g", "diet_Disacc_g", "diet_BetaCaro_mcg", "diet_Vit_B1_mg",
+                  "diet_Vit_B6_mg", "diet_Fol.DFE_mcg_DFE", "diet_Mang_mg", "diet_Copp_mg", 
+                  "diet_TotFib_g", "diet_OCarb_g", "diet_Iron_mg", "diet_TotInsolFib_g")
+diet <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/Diet/New_Diet_Small.csv", header = TRUE) %>%
+  dplyr::select(c("subject_id", all_of(diet_compnts)))
+
+```
+
+## flipped (alternate) mediation from first one we tried
+- Now we are testing to see if diet mediates the association between ASV and SFN
+
+X = ASV
+M = diet
+Y = SFN
+
+```{r combine above separate data constructs into one with all info necessary for model}
+# match data based on subject id
+med_input <- MB_asvtab %>%
+  rownames_to_column("subject_id") %>%
+  inner_join(Urine_SFN, by = "subject_id") %>%
+  inner_join(diet, by = "subject_id")
+
+```
+
+```{r mediation}
+# Use list_sfn and diet_compnts as the list of dietary components
+# make an output file
+med_res <- c()
+pvals_med <- c()
+exp_res_med <- c()
+taxa_list <- colnames(MB_asvtab)
+list_sfns <- c("sum_SFN", "sum_SFN_Cys", "sum_SFN_NAC", "sum_SFN_CG", 
+              "sum_SFN_GSH", "sum_SFN_NIT", "sum_SFN_Tot")
+
+for (i in 1:length(list_sfns)) {
+  for (a in 1:length(diet_compnts)) {
+    for (f in 1:length(taxa_list)) {
+      # add quartiles for each dietary component that will be used
+      # transform ASV abundance and transform SFN abundance
+      med_input <- med_input %>%
+        dplyr::mutate(asv_quarts = ntile(log(med_input[[taxa_list[f]]]+1), 4),
+                      sfn_trans = log(med_input[[list_sfns[i]]] + 1),
+                      diet = med_input[[diet_compnts[a]]])
+      
+      # set models
+      model.M <- lm(diet ~ asv_quarts,
+                    med_input)
+      model.Y <- lm(sfn_trans ~ diet + asv_quarts,
+                    med_input)
+      
+      # mediate
+      results <- mediate(model.M, model.Y, 
+                         treat = "asv_quarts", 
+                         mediator = "diet",
+                         control.value = 1, treat.value = 4, # lowest and highest quartiles
+                         boot = TRUE, sims = 500)
+      
+      # save results
+      exp_res_med[[paste(taxa_list[f], diet_compnts[a], list_sfns[i])]] <- results
+      modsum <- summary(results)
+      pvals_med[[paste(taxa_list[f], diet_compnts[a], list_sfns[i])]] <- list(ACME_pval = modsum$d.avg.p,
+                                                                                   ADE_pval = modsum$z.avg.p,
+                                                                                   prop_mediated_pval = modsum$n.avg.p)
+      
+      if (modsum$d.avg.p <= 0.1) {
+        coeff_tab <- list(ACME_est = modsum$d.avg,
+                          ACME_pval = modsum$d.avg.p,
+                          ADE_est = modsum$z.avg,
+                          ADE_pval = modsum$z.avg.p,
+                          prop_mediated_est = modsum$n.avg,
+                          prop_mediated_pval = modsum$n.avg.p)
+        
+        med_res[[paste(taxa_list[f], diet_compnts[a], list_sfns[i])]] <- coeff_tab
+        
+      } else { print(paste(taxa_list[f], ", ", diet_compnts[a], ", ", list_sfns[i], " are NOT significant"))}
+      
+      # counters
+      f <- f + 1
+    }
+    a <- a + 1
+  }
+  i <- i + 1
+}
+
+
+
+```
+
+View outcomes
+```{r}
+signif <- do.call(rbind.data.frame, pvals_med[names(med_res)]) %>%
+  rownames_to_column("names(med_res)")
+signif
+
+write.table(signif, "signif_meds_flipped.txt")
+
+```
+
+```{r check out one example that might be interesting}
+## X.Eubacterium..ruminantium.group diet_Disacc_g SFN
+
+# select and plot mediation result for this combo
+med_res$`X.Eubacterium..ruminantium.group diet_Disacc_g SFN`
+plot(summary(exp_res_med$`X.Eubacterium..ruminantium.group diet_Disacc_g SFN`))
+
+# select these three variables for plotting
+regrplot <- med_input %>% dplyr::select(X.Eubacterium..ruminantium.group, SFN, diet_Disacc_g)
+
+# graph model.M: a linear model of Disaccharides ~ ASV
+model.M <- lm(diet_Disacc_g ~ log(X.Eubacterium..ruminantium.group+1), med_input)
+summary(model.M)
+# super significant
+
+modM <- ggplot(data = regrplot, aes(x = log(X.Eubacterium..ruminantium.group+1), 
+                                    y = diet_Disacc_g)) +
+  geom_point() +
+  geom_smooth(se = TRUE, method = "lm") +
+  labs(title = "Disaccharides ~ Eubacterium group microbial abundance",
+       y = "Disaccharides (g)")
+  # annotate("text", x = max(log(regrplot$X.Eubacterium..ruminantium.group+1))/2, 
+  #          y = max(regrplot$diet_Disacc_g)+0.001,
+  #          label = paste0("Eubacterium coeff = ", 
+  #                         signif(model.M$coefficients[2], 3), ",\npval = ",
+  #                         signif(summary(model.M)$coefficients[2,4], 2)))
+modM
+
+# graph model.Y: a negative binomial glm of SFN ~ Iron + ASV
+model.Y <- lm(log(SFN+1) ~ diet_Disacc_g + log(X.Eubacterium..ruminantium.group+1), med_input)
+summary(model.Y)
+# not very significant...
+
+modY_ASV <- ggplot(data = regrplot, aes(x = log(X.Eubacterium..ruminantium.group+1), y = log(SFN+1))) +
+  geom_point(aes(color = diet_Disacc_g)) +
+  stat_smooth(method = "lm", se = TRUE) +
+  ggtitle("SFN ~ Eubacterium group microbial abundance")
+  # annotate("text", x = max(log(regrplot$X.Eubacterium..ruminantium.group))/2, 
+  #          y = max(log(regrplot$SFN+1))+0.5,
+  #          label = paste0("Eubacterium coeff = ", signif(model.Y$coefficients[3], 3), ",\npval = ",
+  #                         signif(summary(model.Y)$coefficients[3,4], 2)))
+
+modY_fib <- ggplot(data = regrplot, aes(x = diet_Disacc_g, y = log(SFN+1))) +
+  geom_point() +
+  stat_smooth(method = "lm", se = TRUE) +
+  labs(title = "SFN ~ Disaccharides",
+       x = "Disaccharides (g)")
+  # annotate("text", x = max(regrplot$diet_Disacc_g)/2, 
+  #          y = max(log(regrplot$SFN+1))+0.5,
+  #          label = paste0("Iron coeff = ", signif(model.Y$coefficients[2], 3), ",\npval = ",
+  #                         signif(summary(model.Y)$coefficients[2,4], 2)))
+
+ggarrange(modM, modY_ASV, modY_fib,
+          nrow = 1, ncol = 3,
+          legend = "bottom",
+          align = "h")
+
+# ggsave("ExamplePlot_rumironsfn_flippedmed.png",
+#        height = 5, width = 15, dpi = 300)
+
+```
+
+## save image chunk 
+```{r save env, eval = F}
+save.image("/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/brocc_mediation_Rfiles/flipped_mediation/brocc_flipmed.RData")
+
+```

@@ -1,0 +1,628 @@
+---
+title: "brocc_mediation"
+author: "Alexandra Alexiev"
+date: "2024-07-09"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+# knit options for whole doc. I will add in specific chunks when I don't want this to be the case
+knitr::opts_chunk$set(echo = TRUE, # show code
+                      eval = TRUE, # run chunks when knitting
+                      include = TRUE, # include chunk input in final doc
+                      warning = FALSE, # do not show warnings in final doc
+                      message = FALSE, # do not show messages from code in final doc
+                      collapse = TRUE, # when possible, do put multiple outputs in one block
+                      dpi = 300, # fig resolution
+                      fig.dim = c(9, 5), # the default figure dimensions
+                      out.width = "98%", # the default figure output width
+                      out.height = "98%", # the default figure output height 
+                      cache = TRUE) # dont rerun chunks that haven't been changed
+
+```
+
+
+## libraries and directories
+
+```{r libraries}
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(ggplot2)
+library(mediation)
+library(ggfortify)
+library(ggpubr)
+library(tweedie)
+library(statmod)
+library(AICcmodavg)
+library(stringr)
+set.seed(3)
+
+```
+
+
+```{r set working dir, eval=F}
+setwd("/Users/alexieva/Documents/Projects/Analysis/broccoli project/02_pubAnalysis/Prediction1_mediation/")
+
+load("/Users/alexieva/Documents/Projects/Analysis/broccoli project/02_pubAnalysis/Prediction1_mediation/brocc_mediation.RData")
+
+```
+
+## Input data
+
+```{r input microbiome asv table, urine SFN data, and diet data}
+## microbiome asv table; this is at time 0 as per previous exploratory data analysis
+# only taxa that were previously identified as correlated with SFN and SFN-NIT, whose taxa names are in this SFN_taxa vector
+SFN_taxa <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/input_data/SFN_taxa.txt", header = T)
+
+MB_asvtab <- read.table("/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/input_data/MBasvtab_brocc_cleanT0.txt", header = TRUE) %>%
+  dplyr::select(SFN_taxa$x) %>%
+  rownames_to_column("subject_id")
+
+## SFN data
+# using cumulative SFN, SFN-NIT, and SFN tot across all time points
+# note that there are a few alfalfa eaters here that get filtered out in the process of making combined data frame of med_input
+Urine_SFN <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/SFN_Data/Urine_R_Format.csv",
+                      header = TRUE) %>%
+  group_by(subject_id) %>%
+  summarise(sum_SFN = sum(SFN),
+            sum_SFN_Cys = sum(SFN_Cys),
+            sum_SFN_NAC = sum(SFN_NAC),
+            sum_SFN_CG = sum(SFN_CG),
+            sum_SFN_GSH = sum(SFN_GSH),
+            sum_SFN_NIT = sum(SFN_NIT),
+            sum_SFN_Tot = sum(SFN_Tot))
+  # %>% spread(key = "SFN_metabolites", value = "quantity")
+
+## diet data
+# make a list of the "significant" diet factors we are interested in 
+diet_compnts <- c("diet_Chol_mg", "diet_SatFat_g", "diet_Alc_g", "diet_TotSolFib_g", 
+                  "diet_MonSac_g", "diet_Disacc_g", "diet_BetaCaro_mcg", "diet_Vit_B1_mg",
+                  "diet_Vit_B6_mg", "diet_Fol.DFE_mcg_DFE", "diet_Mang_mg", "diet_Copp_mg", 
+                  "diet_TotFib_g", "diet_OCarb_g", "diet_Iron_mg", "diet_TotInsolFib_g")
+diet <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/Diet/New_Diet_Small.csv", header = TRUE) %>%
+  dplyr::select(c("subject_id", all_of(diet_compnts)))
+
+# write.table(diet, "../input_data/dietData_clean.txt", row.names = F, quote = F)
+
+```
+
+```{r combine above separate data constructs into one with all info necessary for model}
+# match data based on subject id
+med_input <- MB_asvtab %>%
+  inner_join(Urine_SFN, by = "subject_id") %>%
+  inner_join(diet, by = "subject_id")
+
+# write.table(med_input, "../input_data/combinedData_clean.txt", row.names = F, quote = F)
+
+```
+
+## LEFT OFF: rerunning this below with insol fiber data frames
+## check distributions of variables
+```{r check distrubutions of a couple ASVs we are interested in}
+plot(density(MB_asvtab$Bifidobacterium))
+
+plot(density(MB_asvtab$Lachnospiraceae.NK4A136.group))
+
+plot(density(MB_asvtab$Ruminococcus))
+
+plot(density(MB_asvtab$Roseburia))
+
+plot(density(MB_asvtab$Blautia))
+d <- density(MB_asvtab$Blautia)
+quantile(MB_asvtab$Blautia)
+d$x[which.max(d$y)] # use the max peak of the curve for treat.value in mediate() later
+# this value is 1929.751
+
+# most have right skewed density distributions with long right side tails, as is usual for ASV abundances, Blautia is at least approximately normal
+
+```
+
+```{r check distributions of SFN and SFN-NIT, just to get an idea}
+plot(density(Urine_SFN$sum_SFN)) # kinda right skewed
+plot(density(Urine_SFN$sum_SFN_NIT)) # this one is more normal but has a right tail
+plot(density(Urine_SFN$sum_SFN_Tot)) # kinda right skewed
+
+hist(Urine_SFN$sum_SFN)
+hist(Urine_SFN$sum_SFN_NIT)
+hist(Urine_SFN$sum_SFN_Tot)
+
+```
+
+```{r check distributions of total and soluble fiber}
+plot(density(diet$diet_TotSolFib_g)) # very right skewed
+plot(density(diet$diet_TotFib_g)) # more normal
+plot(density(diet$diet_TotInsolFib_g)) # right skewed
+plot(density(diet$diet_OCarb_g)) # more normal but still slightly right skewed
+plot(density(diet$diet_Chol_mg)) # more normal but still slightly right skewed
+
+```
+
+
+## Run mediation analysis
+- the hypothetical model we tested was whether certain ASVs (identified via partial correlation analysis; ASVs correlated to SFN and SFN-NIT) mediate the SFN response (SFN and SFN-NIT) to diet (based on several dietary components, particularly with interest in fiber)
+
+try on one set of each X, Y, and M, then make into for loop
+based on visual model here: https://library.virginia.edu/data/articles/introduction-to-mediation-analysis
+
+X <- dietary components
+
+Y <- SFN (3 types)
+
+M <- ASVs
+
+### First, check model 0 is true
+- will use this output to also limit how many mediations I run later (i.e., only model 0 combinations of SFN and diet components will move forward to mediation analysis)
+
+```{r choose a model for checking link between SFN/SFN-NIT and the different diet components}
+# default lm
+model.0.1 <- lm(sum_SFN ~ diet_TotFib_g, med_input)
+# lm with log of SFN with pseudocount added
+mod_log <- lm(log(sum_SFN+1) ~ diet_TotFib_g, med_input)
+summary(mod_log)
+plot(x = med_input$diet_TotFib_g, y = log(med_input$sum_SFN + 1))
+# lm with polynomial
+mod_logpoly <- lm(log(sum_SFN+1) ~ diet_TotFib_g + I(diet_TotFib_g^2) + I(diet_TotFib_g^3) + I(diet_TotFib_g^4), med_input)
+summary(mod_logpoly)
+plot(x = med_input$diet_TotFib_g, y = log(med_input$sum_SFN + 1))
+pred <- predict(mod_logpoly)
+ix <- sort(med_input$diet_TotFib_g, index.return = T)$ix
+lines(med_input$diet_TotFib_g[ix], pred[ix], col='red', lwd = 2)
+# gamma glm with pseudocount added to SFN
+mod_gam <- glm((sum_SFN+1) ~ diet_TotFib_g, med_input, family = Gamma)
+summary(mod_gam)
+# inverse gaussian flm with pseudocount added to SFN
+mod_invgaus <- glm((sum_SFN+1) ~ diet_TotFib_g, med_input, 
+                   family = inverse.gaussian(link = "log"))
+summary(mod_invgaus)
+# tweedie
+mod_tw <- glm((sum_SFN+1) ~ diet_TotFib_g, med_input,
+              family = tweedie(var.power = 1, link.power = 0))
+summary(mod_tw) # deviance super high
+# negative binomial
+mod_negbin <- glm.nb((sum_SFN+1) ~ diet_TotFib_g, med_input)
+summary(mod_negbin)
+
+# compare with aic
+AIC(model.0.1, mod_log, mod_logpoly, mod_gam, mod_invgaus, mod_negbin)
+# lm with log(SFN+1) is the best model, but the polynomial is close behind
+# however, adjusted R^2 is higher in the logpoly model, so I should probably use that moving forward
+
+```
+
+```{r check if total fiber affects SFN production}
+# model.0 <- lm(Y ~ X)
+model.0.1 <- lm(log(sum_SFN+1) ~ diet_TotFib_g + I(diet_TotFib_g^2) + I(diet_TotFib_g^3) + I(diet_TotFib_g^4), med_input)
+summary(model.0.1)
+# every term is almost significant
+
+# diagnostic plots
+autoplot(model.0.1)
+# Homoskedastic. Residuals are more or less normally distributed. Residuals are mostly linear.
+
+# plot
+plot(x = med_input$diet_TotFib_g, y = log(med_input$sum_SFN + 1))
+pred <- predict(model.0.1)
+ix <- sort(med_input$diet_TotFib_g, index.return = T)$ix
+lines(med_input$diet_TotFib_g[ix], pred[ix], col='red', lwd = 2)
+
+
+model.0.2 <- lm(log(sum_SFN_NIT+1) ~ diet_TotFib_g + I(diet_TotFib_g^2) + I(diet_TotFib_g^3) + I(diet_TotFib_g^4), med_input)
+summary(model.0.2)
+# no significance
+
+
+```
+
+```{r loop through all dietary components with each SFN}
+list_sfn <- c("sum_SFN", "sum_SFN_Cys", "sum_SFN_NAC", "sum_SFN_CG", 
+              "sum_SFN_GSH", "sum_SFN_NIT", "sum_SFN_Tot")
+# and use diet_compnts as the list of dietary components
+# make an output file
+model.0_lms <- c()
+pvals_model.0_lms <- c()
+
+for (a in 1:length(list_sfn)) {
+  for (e in 1:length(diet_compnts)) {
+    model.0 <- lm(paste0("log(", list_sfn[a], "+1) ~ ", 
+                        diet_compnts[e], "+ I(", diet_compnts[e], "^2) + I(", 
+                        diet_compnts[e], "^3) + I(", diet_compnts[e], "^4)"), 
+                        data = med_input)
+    modsum <- summary(model.0)
+    coeff_tab <- as.data.frame(modsum$coefficients)
+    model.0_lms[[paste(list_sfn[a], "~", diet_compnts[e])]] <- coeff_tab
+    pvals_model.0_lms[[paste(list_sfn[a], "~", diet_compnts[e])]][["diet"]] <- coeff_tab[2,4]
+    pvals_model.0_lms[[paste(list_sfn[a], "~", diet_compnts[e])]][["diet2"]] <- coeff_tab[3,4]
+    pvals_model.0_lms[[paste(list_sfn[a], "~", diet_compnts[e])]][["diet3"]] <- coeff_tab[4,4]
+    pvals_model.0_lms[[paste(list_sfn[a], "~", diet_compnts[e])]][["diet4"]] <- coeff_tab[5,4]
+    e <- e + 1
+  }
+  a <- a + 1
+}
+
+pvals_model.0_lms <- t(as.data.frame(pvals_model.0_lms))
+# a few are significant with an alpha of 0.05
+
+# want to save insoluble fiber to show coauthors and maybe reviewers
+justinsols <- as.data.frame(pvals_model.0_lms) %>%
+  filter(grepl("diet_TotInsolFib_g", rownames(pvals_model.0_lms)))
+write.table(justinsols, "../outputs/insol_pvals.txt", quote = F)
+
+hist(pvals_model.0_lms, breaks = 20)
+abline(v = quantile(pvals_model.0_lms, 0.05))
+
+# which ones are those?
+sign_dietSFNcombos <- pvals_model.0_lms[which(pvals_model.0_lms <= 0.05), ]
+sign_dietSFNcombos
+
+# there are a ton of these that are significant
+
+```
+
+Pick model 0 as SFN and total dietary fiber to try code on
+
+### Troubleshoot model Y and M that will go into mediation
+
+```{r trying to troubleshoot model Y, eval=F}
+## try to use a tweedie model
+model.Y.1 <- glm(sum_SFN ~ diet_TotFib_g + Blautia, med_input, 
+               family = tweedie(var.power = 1, link.power = 0))
+# no warnings
+summary(model.Y.1)
+# its ok, no warnings now, but the deviance has gone up, no AIC, and more overdispersed
+
+## try scaling sfn
+# med_input$SFN_scaled <- round(((med_input$sum_SFN - min(med_input$sum_SFN)) / (max(med_input$sum_SFN) - min(med_input$sum_SFN)) * 100), digits = 0)
+# plot(density(med_input$SFN_scaled))
+# plot(density(med_input$sum_SFN))
+# 
+# model.Y.2 <- glm.nb(SFN_scaled ~ diet_TotFib_g + Blautia, med_input)
+# summary(model.Y.2)
+# plot(x = med_input$Blautia, y = med_input$SFN_scaled)
+# # the same as unscaled so no point in scaling
+
+## try log transforming
+model.Y.3 <- glm.nb(log(sum_SFN+1) ~ diet_TotFib_g + Blautia, med_input)
+summary(model.Y.3) # nothing
+model.Y.3b <- glm.nb(sum_SFN ~ diet_TotFib_g + Blautia, med_input)
+
+## try lm
+model.Y.4 <- lm(log(sum_SFN+1) ~ diet_TotFib_g + log(Blautia+1), med_input)
+summary(model.Y.4) # nothing
+
+## inverse gaussian
+model.Y.5 <- glm(formula = log(sum_SFN + 1) ~ diet_TotFib_g + Blautia, 
+                family = inverse.gaussian(link = "log"), data = med_input)
+summary(model.Y.5)
+
+
+## inv gaussian wo log sfn
+model.Y.5b <- glm(formula = sum_SFN ~ diet_TotFib_g + Blautia, 
+                family = inverse.gaussian(link = "log"), data = med_input)
+
+## use AIC to evaluate best option
+AIC(model.Y.0, model.Y.2, model.Y.3, model.Y.3b, model.Y.4, model.Y.5, model.Y.5b)
+AICtweedie( model.Y.1, dispersion = 1, k = 2, verbose = TRUE) # so really not a good fit at all for the data
+# compare
+
+# model Y4 has a negative adj R2 despite having the lowest AIC, so Y5 is the best choice here
+
+
+```
+
+```{r troubleshoot model.M, eval=F}
+plot(med_input$quarts_totfib, med_input$f_Erysipelotrichaceae_ASV487)
+plot(med_input$quarts_totfib, log(med_input$f_Erysipelotrichaceae_ASV487 + 1))
+
+## basic lm
+model.M.0 <- lm(f_Erysipelotrichaceae_ASV487 ~ diet_TotFib_g, med_input)
+summary(model.M.0)
+
+## glm negative binomial
+model.M.1 <- glm.nb(f_Erysipelotrichaceae_ASV487 ~ diet_TotFib_g, med_input)
+summary(model.M.1)
+
+## log lm
+model.M.2 <- lm(log(f_Erysipelotrichaceae_ASV487+1) ~ diet_TotFib_g, med_input)
+summary(model.M.2)
+
+## zero-infl neg bin
+library(pscl)
+model.M.3 <- zeroinfl(f_Erysipelotrichaceae_ASV487 ~ diet_TotFib_g, med_input, 
+                      dist = "negbin")
+summary(model.M.3)
+
+## evaluate
+AIC(model.M.0, model.M.1, model.M.2, model.M.3)
+# model M2 is best (tried with a couple ASVs)
+
+```
+
+```{r run mediation code on test set of variables}
+# add quartiles for X (diet_TotFib_g)
+med_input <- med_input %>%
+  mutate(quarts_totfib = ntile(diet_TotFib_g, 4),
+         SFN_trans = log(sum_SFN+1),
+         SFN_Tot_trans = log(sum_SFN_Tot+1),
+         Blautia_trans = log(Blautia))
+model.M <- lm(Blautia_trans ~ quarts_totfib, med_input)
+model.Y <- lm(SFN_trans ~ quarts_totfib + Blautia, med_input)
+
+results <- mediate(model.M, model.Y, treat = "quarts_totfib", mediator = "Blautia",
+                   control.value = 1, treat.value = 4, # lowest and highest quartiles
+                   boot = TRUE, sims = 500)
+summary(results) # not great but at least now I have a way to implement loop code
+
+```
+
+## Implement loop to cycle through each relevant SFN-dietary combo and each ASV
+- only use significant SFN-diet combos from above
+
+```{r loop through all SFNs, dietary components, and ASVs}
+# Use list_sfn and diet_compnts as the list of dietary components
+# make SFN taxa a list
+taxa_list <- as.character(SFN_taxa$x)
+# make an output file
+med_res <- c()
+pvals_med <- c()
+exp_res_med <- c()
+list_combos <- as.data.frame(sign_dietSFNcombos) %>%
+  rownames_to_column("comparison") %>%
+  dplyr::filter(!grepl("diet2|diet3|diet4", comparison)) %>%
+  mutate(comparison = str_remove(comparison, ".diet$"),
+         sfn = stringr::str_split(comparison, "\\...", simplify = T)[, 1],
+         diet = stringr::str_split(comparison, "\\...", simplify = T)[, 2],
+         diet = replace(diet, diet == "diet_Fol", "diet_Fol.DFE_mcg_DFE")) %>%
+  dplyr::select(-c("comparison", "sign_dietSFNcombos"))
+
+for (a in 1:nrow(list_combos)) {
+    for (f in 1:length(taxa_list)) {
+      # add quartiles for each dietary component that will be used
+      # transform ASV abundance and transform SFN abundance
+      med_input <- med_input %>%
+        dplyr::mutate(quarts = ntile(med_input[[list_combos[a,2]]], 4),
+                      sfn_trans = log(med_input[[list_combos[a,1]]] + 1),
+                      asv_trans = log(med_input[[taxa_list[f]]] + 1),
+                      asv = med_input[[taxa_list[f]]])
+
+      # set models
+      model.M <- lm(asv_trans ~ quarts,
+                    med_input)
+      model.Y <- lm(sfn_trans ~ quarts + asv_trans,
+                    med_input)
+      
+      # mediate
+      results <- mediate(model.M, model.Y, 
+                         treat = "quarts", 
+                         mediator = "asv_trans",
+                         control.value = 1, treat.value = 4, # lowest and highest quartiles
+                         boot = TRUE, sims = 500)
+      
+      # save results
+      exp_res_med[[paste(list_combos[a,1], taxa_list[f], list_combos[a,2])]] <- results
+      modsum <- summary(results)
+      pvals_med[[paste(list_combos[a,1], taxa_list[f], list_combos[a,2])]] <- list(ACME_pval = modsum$d.avg.p,
+                                                                            ADE_pval = modsum$z.avg.p,
+                                                                            prop_mediated_pval = modsum$n.avg.p)
+      modsum$p.adj <- p.adjust(modsum$d.avg.p, method = "fdr")
+      
+      if (modsum$p.adj <= 0.2) {
+        coeff_tab <- list(ACME_est = modsum$d.avg,
+           ACME_pval = modsum$d.avg.p,
+           ADE_est = modsum$z.avg,
+           ADE_pval = modsum$z.avg.p,
+           prop_mediated_est = modsum$n.avg,
+           prop_mediated_pval = modsum$n.avg.p)
+
+        med_res[[paste(list_combos[a,1], taxa_list[f], list_combos[a,2])]] <- coeff_tab
+
+      } else { print(paste(list_combos[a,1], ",", taxa_list[f], ",",
+                           list_combos[a,2], "are NOT significant"))}
+      
+      # counters
+      f <- f + 1
+  }
+  a <- a + 1
+}
+
+```
+
+```{r save the objects from having "or" between each p value in if statement above, eval = F}
+# saveRDS(med_res, "mediation_result_notconservative.Rdata")
+# saveRDS(pvals_med, "pvals_mediation_notconservative.Rdata")
+# saveRDS(exp_res_med, "expanded_mediation_results_notconservative.Rdata")
+
+# saveRDS(med_res, "mediation_result_signifsfndiets.Rdata")
+# saveRDS(pvals_med, "pvals_mediation_signifsfndiets.Rdata")
+# saveRDS(exp_res_med, "expanded_mediation_results_signifsfndiets.Rdata")
+
+saveRDS(med_res, "mediation_result_signifcumSFNs.Rdata")
+saveRDS(pvals_med, "pvals_mediation_signifcumSFNs.Rdata")
+saveRDS(exp_res_med, "expanded_mediation_results_signifcumSFNs.Rdata")
+
+```
+
+
+## Examine results
+```{r which SFN-taxa-diet combos are potential mediations}
+signif <- do.call(rbind.data.frame, pvals_med[names(med_res)]) %>%
+  rownames_to_column("names(med_res)")
+signif
+
+# write.table(signif, "../outputs/signif_meds_cumsfn.txt")
+
+med_res
+
+```
+
+```{r for loop for all graphs}
+# write a for loop with the above code to make graphs of all of them
+medsignif_combos <- names(med_res) # 17 of these
+
+# make output plot list
+plot_list <- list()
+
+# for loop to make graphs
+for (i in 1:length(medsignif_combos)) {
+  # first separate name to be three names
+  name <- medsignif_combos[i]
+  X <- strsplit(name, " ")[[1]][1]
+  M <- strsplit(name, " ")[[1]][2]
+  Y <- strsplit(name, " ")[[1]][3]
+  
+  # make a filtered data frame for ggplot to use
+  regrplot <- med_input %>% 
+    dplyr::select(all_of(M), all_of(X), all_of(Y))
+  regrplot$trans_M <- log(regrplot[[M]]+1)
+  regrplot$trans_X <- log(regrplot[[X]]+1)
+  names(regrplot)[names(regrplot) == M] <- "M_vals"
+  names(regrplot)[names(regrplot) == X] <- "X_vals"
+  names(regrplot)[names(regrplot) == Y] <- "Y_vals"
+  
+  # make graph
+  if(i == 1) {
+    regrplot <- regrplot %>%
+      dplyr::filter(regrplot$Y_vals != max(regrplot$Y_vals))
+    }
+  p <- ggplot(data = regrplot, aes(y = trans_X, x = trans_M)) +
+    geom_point(aes(color = Y_vals)) +
+    geom_smooth(se = TRUE, method = "lm") +
+    labs(y = paste0(X, " quantity"),
+       x = "ASV abundance",
+       color = paste0("log transformed \n", Y, " quantity"), title = M) +
+    theme(text = element_text(size = 14))
+  
+  # add to plot list
+  plot_list[[i]] <- p
+  # save
+  ggsave(paste0("/Users/alexieva/Documents/Projects/Analysis/broccoli project/02_pubAnalysis/outputs/P1_medres/P1MedRes_plot_", i, ".png"),
+         plot_list[[i]],
+         height = 5, width = 7, dpi = 300)
+  
+  
+}
+
+g <- ggpubr::ggarrange(plotlist = plot_list,
+          ncol = 5, nrow = 4,
+          common.legend = T,
+          legend = "bottom")
+
+ggsave("/Users/alexieva/Documents/Projects/Analysis/broccoli project/02_pubAnalysis/outputs/P1MedRes_plotALL.png",
+        g,
+        height = 14, width = 18, dpi = 300)
+
+
+```
+
+```{r for loop for all graphs reversed SFN and diet}
+# write a for loop with the above code to make graphs of all of them
+medsignif_combos <- names(med_res) # 17 of these
+
+# make output plot list
+plot_list <- list()
+
+# for loop to make graphs
+for (i in 1:length(medsignif_combos)) {
+  # first separate name to be three names
+  name <- medsignif_combos[i]
+  X <- strsplit(name, " ")[[1]][1]
+  M <- strsplit(name, " ")[[1]][2]
+  Y <- strsplit(name, " ")[[1]][3]
+  
+  # make a filtered data frame for ggplot to use
+  regrplot <- med_input %>% 
+    dplyr::select(all_of(M), all_of(X), all_of(Y))
+  regrplot$trans_M <- log(regrplot[[M]]+1)
+  regrplot$trans_X <- log(regrplot[[X]]+1)
+  names(regrplot)[names(regrplot) == M] <- "M_vals"
+  names(regrplot)[names(regrplot) == X] <- "X_vals"
+  names(regrplot)[names(regrplot) == Y] <- "Y_vals"
+  
+  # make graph
+  if(i == 1) {
+    regrplot <- regrplot %>%
+      dplyr::filter(regrplot$Y_vals != max(regrplot$Y_vals))
+    }
+  p <- ggplot(data = regrplot, aes(y = trans_M, x = Y_vals)) +
+    geom_point(aes(color = trans_X)) +
+    geom_smooth(se = TRUE, method = "lm") +
+    labs(y = "ASV abundance",
+       x = paste0("log transformed \n", Y, " quantity"),
+       color = paste0(X, " quantity"), title = M) +
+    theme(text = element_text(size = 14))
+  
+  # add to plot list
+  plot_list[[i]] <- p
+  # save
+  ggsave(paste0("/Users/alexieva/Documents/Projects/Analysis/broccoli project/02_pubAnalysis/outputs/P1_medres/P1MedRes_plot_", i, ".png"),
+         plot_list[[i]],
+         height = 5, width = 7, dpi = 300)
+  
+  
+}
+
+g <- ggpubr::ggarrange(plotlist = plot_list,
+          ncol = 5, nrow = 4,
+          common.legend = T,
+          legend = "bottom")
+
+ggsave("/Users/alexieva/Documents/Projects/Analysis/broccoli project/02_pubAnalysis/outputs/P1MedRes_plotALL_reversed.png",
+        g,
+        height = 14, width = 18, dpi = 300)
+
+
+```
+
+## Re-run Collinsella result without Vit B1 outlier person
+- the significant combo from above, Collinsella - vitamin B1 - SFN, has an outlier in the vit B1 data (one inidividual just has extremely high B1 for some reason)
+- plan is to remove this outlier and rerun just that mediation and graph
+
+```{r collinsella B1 SFN rerun filter outlier from input}
+med_input_B1filt <- med_input %>%
+  dplyr::filter(diet_Vit_B1_mg != max(diet_Vit_B1_mg))
+
+
+```
+
+```{r collinsella B1 SFN rerun mediation}
+med_input_B1filt2 <- med_input_B1filt %>%
+        dplyr::mutate(quarts = ntile(diet_Vit_B1_mg, 4),
+                      asv_trans = log(Collinsella+1),
+                      sfn_trans = log(sum_SFN+1))
+
+model.M.B1 <- lm(asv_trans ~ quarts,
+                    med_input_B1filt2)
+summary(model.M)
+
+model.Y.B1 <- lm(sfn_trans ~ quarts + asv_trans,
+                    med_input_B1filt2)
+summary(model.Y)
+
+med_B1results <- mediate(model.M.B1, model.Y.B1, 
+                         treat = "quarts", 
+                         mediator = "asv_trans",
+                         control.value = 1, treat.value = 4, # lowest and highest quartiles
+                         boot = TRUE, sims = 500)
+
+
+modsumB1 <- summary(med_B1results)
+modsumB1
+
+coeff_tab_medB1 <- list(ACME_est = modsumB1$d.avg,
+           ACME_pval = p.adjust(modsumB1$d.avg.p, method = "fdr"),
+           ADE_est = modsumB1$z.avg,
+           ADE_pval = p.adjust(modsumB1$z.avg.p, method = "fdr"),
+           prop_mediated_est = modsumB1$n.avg,
+           prop_mediated_pval = p.adjust(modsumB1$n.avg.p, method = "fdr"))
+
+
+```
+
+
+## save image chunk 
+```{r save env, eval = F}
+save.image("/Users/alexieva/Documents/Projects/Analysis/broccoli project/02_pubAnalysis/Prediction1_mediation/brocc_mediation.RData")
+
+```

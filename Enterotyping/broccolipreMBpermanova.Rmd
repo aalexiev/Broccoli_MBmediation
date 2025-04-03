@@ -1,0 +1,664 @@
+---
+title: "broccoli pre-MB permanova"
+author: "Alexandra Alexiev"
+date: "2024-10-02"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+# knit options for whole doc. I will add in specific chunks when I don't want this to be the case
+knitr::opts_chunk$set(echo = TRUE, # show code
+                      eval = TRUE, # run chunks when knitting
+                      include = TRUE, # include chunk input in final doc
+                      warning = FALSE, # do not show warnings in final doc
+                      message = FALSE, # do not show messages from code in final doc
+                      collapse = TRUE, # when possible, do put multiple outputs in one block
+                      dpi = 300, # fig resolution
+                      fig.dim = c(9, 5), # the default figure dimensions
+                      out.width = "98%", # the default figure output width
+                      out.height = "98%", # the default figure output height 
+                      cache = TRUE) # dont rerun chunks that haven't been changed
+
+```
+
+## libraries and directories
+
+```{r libraries}
+library(tibble)
+library(dplyr)
+library(vegan)
+set.seed(3)
+
+```
+
+```{r set working dir, eval=F}
+setwd("/Users/alexieva/Documents/Projects/Analysis/broccoli project/02_pubAnalysis/Enterotyping/")
+
+load("/Users/alexieva/Documents/Projects/Analysis/broccoli project/02_pubAnalysis/Enterotyping//broccolipreMBpermanova.RData")
+
+```
+
+## Input data
+```{r input microbiome asv table, urine SFN data, and diet data}
+## microbiome data
+# taxa table
+MB_taxtab <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/Microbiome_Flat/TaxTable_BSS.csv",
+                      header = TRUE) 
+
+# metadata for microbiome stuff
+metadata <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/Microbiome_Flat/SampleData_BSS.csv",
+                      header = TRUE) %>%
+  dplyr::filter(time == 0) %>% # for now just Time 0 data
+  mutate(broc_consum = case_when(veg == "broc" ~ "1",
+                                 veg == "alf" ~ "0"))
+
+# ASV table (ASV reads per sample)
+MB_asvtab <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/Microbiome_Flat/ASVTable_BSS.csv",
+                      header = TRUE) %>%
+  dplyr::filter(sample %in% metadata$sample) # just time 0 data
+
+# clean up subject ID names so they will match the metadata
+MB_asvtab$sample <- sub("_[^_]+_[^_]+$", "", MB_asvtab$sample)
+
+# rename the ASVs by their taxonomy (genus level)
+MB_asvtab <-as.data.frame(t(column_to_rownames(MB_asvtab, "sample")))
+MB_asvtab$Genus[which(rownames(MB_asvtab) == MB_taxtab$ASV)] <- MB_taxtab$Genus
+MB_asvtab <- MB_asvtab %>%
+  group_by(Genus) %>%
+  summarise(across(where(is.numeric), sum)) %>%
+  column_to_rownames("Genus") %>%
+  t() %>%
+  as.data.frame()
+
+
+```
+
+```{r SFN data}
+## SFN data
+# cumulative across all timepoints
+# include all SFN types
+## SFN data
+
+Urine_SFN <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/SFN_Data/Urine_R_Format.csv",
+                      header = TRUE) %>%
+    group_by(subject_id) %>%
+  summarise(sum_SFN = sum(SFN),
+            sum_SFN_Cys = sum(SFN_Cys),
+            sum_SFN_NAC = sum(SFN_NAC),
+            sum_SFN_CG = sum(SFN_CG),
+            sum_SFN_GSH = sum(SFN_GSH),
+            sum_SFN_NIT = sum(SFN_NIT),
+            sum_SFN_Tot = sum(SFN_Tot))
+
+# make a mega metadata file
+mega_meta <- inner_join(metadata, Urine_SFN, by = "subject_id")
+mega_meta <- mega_meta[order(mega_meta$subject_id),] # this also takes out the alfalfa eaters
+
+
+```
+
+```{r diet data}
+## diet data
+# make a list of the "significant" diet factors we are interested in 
+diet_compnts <- c("diet_Chol_mg", "diet_SatFat_g", "diet_Alc_g", "diet_TotSolFib_g", 
+                  "diet_MonSac_g", "diet_Disacc_g", "diet_BetaCaro_mcg", "diet_Vit_B1_mg",
+                  "diet_Vit_B6_mg", "diet_Fol.DFE_mcg_DFE", "diet_Mang_mg", "diet_Copp_mg", 
+                  "diet_TotFib_g", "diet_OCarb_g", "diet_Iron_mg", "diet_TotInsolFib_g")
+diet <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/Diet/New_Diet_Small.csv", header = TRUE) %>%
+  dplyr::select(c("subject_id", all_of(diet_compnts)))
+
+
+```
+
+
+```{r determine and assign enterotype}
+library(phyloseq)
+
+# make per sample taxa plots (stacked bar plots)
+# ASV table (ASV reads per sample)
+MB_asvtab_2 <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/Microbiome_Flat/ASVTable_BSS.csv",
+                      header = TRUE) %>%
+  dplyr::filter(sample %in% metadata$sample) # just time 0 data
+# clean up subject ID names so they will match the metadata
+MB_asvtab_2$sample <- sub("_[^_]+_[^_]+$", "", MB_asvtab_2$sample)
+MB_asvtab_2 <- column_to_rownames(MB_asvtab_2, "sample")
+# transpose
+trans_mbasvtab <- as.data.frame(t(MB_asvtab_2))
+# make col into rownames in taxa table
+MB_taxtab2 <- MB_taxtab %>%
+  column_to_rownames("ASV") %>%
+  rename_at('Kingdom', ~ 'Domain') %>%
+  as.matrix()
+
+# make phyloseq obj and plot
+OTU <- otu_table(trans_mbasvtab, taxa_are_rows = TRUE)
+TAX <- tax_table(MB_taxtab2)
+physeq <- phyloseq(OTU, TAX)
+TopNOTUs <- names(which(MB_taxtab2[,6] == "Prevotella_9" | MB_taxtab2[,6] == "Bacteroides" | MB_taxtab2[,6] == "Ruminococcus"))
+ent10 <- prune_taxa(TopNOTUs, physeq)
+plot_bar(ent10, fill = "Genus")
+
+# there does seem to be basis for 2-3 enterotypes here
+
+
+
+```
+
+
+## permanova tests on whole data set (with alfalfa eaters)
+- wanted to test permanova models with alfalfa eaters and no SFN so there is variation in dietary components like fiber
+```{r read in metadata files with groups (from different RMD)}
+# with alfalfa eaters, there are 2 groups here, add diet
+meta_groups_alfbrocc <- read.table("/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/brocc_mediation_Rfiles/inputs/meta_groups_alfbrocc.txt",
+                                   header = T, sep = "\t") %>%
+  inner_join(diet, by = "subject_id")
+
+# without alfalfa eaters (just brocc), there are 3 groups here, add diet
+meta_groups_brocc <- read.table("/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/brocc_mediation_Rfiles/inputs/meta_groups_brocc.txt",
+                                   header = T, sep = "\t") %>%
+  inner_join(diet, by = "subject_id")
+
+```
+
+- Ordistep used to choose best model for dbRDA.
+- This best model was then used in the PERMANOVA to get significance.
+
+```{r ordistep for dbRDA}
+ALLmod0 <- capscale(MB_asvtab ~ 1, meta_groups_alfbrocc, distance = "bray")  # Model with intercept only
+ALLmod1 <- capscale(MB_asvtab ~ . + .*., meta_groups_alfbrocc, distance = "bray")  # Model with all explanatory variables
+## problem: model is overfitted
+
+ordiALL <- ordistep(ALLmod0, scope = formula(ALLmod1)) # this determines what the best model is to run RDA on
+ordiALL
+# best model is MB_asvtab ~ groups_alf.cluster + diet_TotInsolFib_g + diet_OCarb_g + age
+# + sample_issue + weight_lb + diet_TotInsolFib_g:age
+# model inertia was 9.0628; Inertia is squared Bray distance
+
+
+```
+
+```{r dbRDA run with best model from ordistep}
+# calculate RDA (distance based)
+rda <- capscale(formula = MB_asvtab ~ groups_alf.cluster + diet_TotInsolFib_g + diet_OCarb_g + age
++ sample_issue + weight_lb + diet_TotInsolFib_g:age, 
+                   data = meta_groups_alfbrocc, distance = "bray")
+RsquareAdj(rda)
+# 0.256 of variation explained by this model
+summary(rda)
+
+plot(rda)
+
+```
+
+```{r permanova best model}
+dm_walf <- vegdist(MB_asvtab, method = "bray")
+Perm <- adonis2(dm_walf ~ groups_alf.cluster + diet_TotInsolFib_g + diet_OCarb_g + age
++ sample_issue + weight_lb + diet_TotInsolFib_g:age, 
+                            data = meta_groups_alfbrocc)
+Perm
+
+# write.table(Perm,
+#             "Perm_w_alf.txt",
+#             sep = "\t")
+
+
+```
+
+```{r rda graph}
+# create files for graphing
+smry_rda <- summary(rda)
+
+# this is the coordinates for the points and metadata
+meta_groups_filt <- meta_groups_alfbrocc %>%
+  dplyr::select(c(subject_id, group, diet_TotInsolFib_g, diet_OCarb_g, veg, age, weight_lb, sample_issue))
+pw_PC1  <- data.frame(smry_rda$sites[,1:2]) %>%  # these are the x, y coordinates for the sample points
+  rownames_to_column("subject_id") %>%
+  inner_join(meta_groups_filt, by = "subject_id") %>%
+  column_to_rownames("subject_id")
+mylims <- range(with(pw_PC1, c(CAP1, CAP2)))
+pw_PC1$group <- as.factor(pw_PC1$group)
+
+# the biplot scores are the correlations between your environmental variables and axes
+pw_PC2  <- data.frame(smry_rda$biplot[1:6,])
+
+# put plot together
+rda_plot <- ggplot(pw_PC1, aes(x = CAP1, y = CAP2)) + 
+  geom_point(aes(color = group), size = 2) +
+  theme_classic() +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  geom_vline(xintercept = 0, linetype = "dotted") +
+  stat_ellipse(aes(group = veg, linetype = veg), show.legend = T) +
+  geom_segment(data = pw_PC2, aes(x = 0, xend = CAP1, y = 0, yend = CAP2), 
+               color = "black", arrow = arrow(length = unit(0.01, "npc"))) +
+  geom_text(data = pw_PC2, 
+            aes(x = CAP1, y = CAP2), label = row.names(pw_PC2), 
+            color = "black", size = 4, hjust = 0, vjust = 1) +
+  labs(x = paste0("CAP1 (",round(100*smry_rda$cont$importance[2, "CAP1"], digits = 2),"%)"),
+       y = paste0("CAP2 (",round(100*smry_rda$cont$importance[2, "CAP2"], digits = 2),"%)")) +  
+  scale_color_brewer(palette = "Set1",
+                    name = "pre-treatment microbiome group") +
+  theme(text = element_text(size = 20))
+rda_plot
+
+# ggsave("wALFpwrda_plot.tiff",
+#        width = 12,
+#        height = 7,
+#        dpi = 300)
+
+
+```
+
+
+## permanova tests on only broccoli consumers
+- removed alfalfa eaters and add sfn data
+```{r filter so there are broccoli eaters only}
+MB_asvtab_brocc <- MB_asvtab %>%
+  rownames_to_column("subject_id") %>%
+  dplyr::filter(subject_id %in% meta_groups_brocc$subject_id) %>%
+  column_to_rownames("subject_id")
+
+
+```
+
+- Ordistep used to choose best model for dbRDA.
+- This best model was then used in the PERMANOVA to get significance.
+
+```{r broccoli ordistep for dbRDA}
+meta_groups_brocc <- meta_groups_brocc %>%
+  dplyr::select(-c(sample, treatment, sample_issue, time, veg, broc_consum, diet))
+broccmod0 <- capscale(MB_asvtab_brocc ~ 1, meta_groups_brocc, distance = "bray")  # Model with intercept only
+broccmod1 <- capscale(MB_asvtab_brocc ~ . + .*., meta_groups_brocc, distance = "bray")  # Model with all explanatory variables
+ordibrocc <- ordistep(broccmod0, scope = formula(broccmod1)) # this determines what the best model is to run RDA on
+ordibrocc
+# best model is MB_asvtab_brocc ~ group + diet_TotSolFib_g + diet_OCarb_g + weight_lb +
+# diet_TotSolFib_g:diet_OCarb_g
+# model inertia was 4.6352; Inertia is squared Bray distance
+
+
+```
+
+```{r broccoli dbRDA run with best model from ordistep}
+# calculate RDA (distance based)
+rda_brocc <- capscale(formula = MB_asvtab_brocc ~ group + diet_TotSolFib_g + diet_OCarb_g + weight_lb +
+diet_TotSolFib_g:diet_OCarb_g, data = meta_groups_brocc, 
+                      distance = "bray")
+RsquareAdj(rda_brocc)
+# 0.374 of variation explained by this model
+summary(rda_brocc)
+
+plot(rda_brocc)
+
+```
+
+```{r broccoli permanova best model}
+dm_brocc <- vegdist(MB_asvtab_brocc, method = "bray")
+Perm_brocc <- adonis2(dm_brocc ~ group + diet_TotSolFib_g + diet_OCarb_g + weight_lb +
+diet_TotSolFib_g:diet_OCarb_g, 
+                            data = meta_groups_brocc)
+Perm_brocc
+p.adjust(Perm_brocc$`Pr(>F)`, "fdr")
+
+# write.table(Perm_brocc,
+#             "../outputs/Perm_brocc.txt",
+#             sep = "\t")
+
+```
+
+```{r broccoli rda graph}
+# create files for graphing
+smry_rda_brocc <- summary(rda_brocc)
+
+# this is the coordinates for the points and metadata
+meta_groups_filt_brocc <- meta_groups_brocc %>%
+  dplyr::select(c(subject_id, group, diet_OCarb_g, diet_TotSolFib_g, weight_lb))
+brocc_PC1  <- data.frame(smry_rda_brocc$sites[,1:2]) %>%  # these are the x, y coordinates for the sample points
+  rownames_to_column("subject_id") %>%
+  inner_join(meta_groups_filt_brocc, by = "subject_id") %>%
+  column_to_rownames("subject_id")
+mylims <- range(with(brocc_PC1, c(CAP1, CAP2)))
+brocc_PC1$group <- as.factor(brocc_PC1$group)
+
+# the biplot scores are the correlations between your environmental variables and axes
+brocc_PC2  <- data.frame(smry_rda_brocc$biplot[1:5,])
+
+# put plot together
+rda_plot_brocc <- ggplot(brocc_PC1, aes(x = CAP1, y = CAP2)) + 
+  geom_point(aes(color = group), size = 2) +
+  theme_classic() +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  geom_vline(xintercept = 0, linetype = "dotted") +
+  geom_segment(data = brocc_PC2[c(3:5),], aes(x = 0, xend = CAP1, y = 0, yend = CAP2), 
+               color = "black", arrow = arrow(length = unit(0.01, "npc"))) +
+  geom_text(data = brocc_PC2[c(3:5),], 
+            aes(x = CAP1, y = CAP2), label = c("Total Soluble Fiber", "Other Carbs", "Weight (lb)"), 
+            color = "black", size = 4, hjust = 1, vjust = 0.5) +
+  labs(x = paste0("CAP1 (",round(100*smry_rda$cont$importance[2, "CAP1"], digits = 2),"%)"),
+       y = paste0("CAP2 (",round(100*smry_rda$cont$importance[2, "CAP2"], digits = 2),"%)")) +  
+  scale_color_brewer(palette = "Set1",
+                    name = "pre-treatment\nmicrobiome group") +
+  theme(text = element_text(size = 20))
+rda_plot_brocc
+
+# ggsave("../outputs/rda_plot_brocc_groupsinformula.png",
+#        width = 10,
+#        height = 7,
+#        dpi = 300)
+
+
+## simple graph
+rda_plot_plain <- ggplot(brocc_PC1, aes(x = CAP1, y = CAP2)) + 
+  geom_point(aes(color = group), size = 2) +
+  theme_classic() +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  geom_vline(xintercept = 0, linetype = "dotted") +
+  scale_color_brewer(palette = "Set1",
+                    name = "pre-treatment\nmicrobiome group") +
+  theme(text = element_text(size = 20))
+rda_plot_plain
+
+# ggsave("../outputs/rda_plot_plain.png",
+#        width = 10,
+#        height = 7,
+#        dpi = 300)
+
+```
+
+## redo above but without group - this is for the main manuscript
+- broccoli only
+- remove group since it might be "stealing" some of the variation in BC ordination space
+- Sample issue removed; subject 40 is on the edge of the ordination space and was artificially stealing some variation as such but did not have any reason to be noted and isn't truly an outlier
+```{r broccoli ordistep for dbRDA}
+meta_nogroups_brocc <- meta_groups_brocc %>%
+  dplyr::select(-c(group, ethnicity, relation, height_in, weight_lb)) %>% # removed colinear ones as well because they are creating overfitting in model
+  column_to_rownames("subject_id")
+broccmod0 <- capscale(MB_asvtab_brocc ~ 1, meta_nogroups_brocc, distance = "bray")  # Model with intercept only
+broccmod1 <- capscale(MB_asvtab_brocc ~ . , meta_nogroups_brocc, distance = "bray")  # Model with all explanatory variables
+ordibrocc <- ordistep(broccmod0, scope = formula(broccmod1), permutations = how(nperm = 499)) # this determines what the best model is to run RDA on
+ordibrocc
+# best model is diet_TotInsolFib_g + diet_OCarb_g
+# model inertia was 4.6352; Inertia is squared Bray distance
+
+
+```
+
+```{r broccoli dbRDA run with best model from ordistep}
+# calculate RDA (distance based) of first model
+rda_brocc <- capscale(formula = MB_asvtab_brocc ~ diet_TotInsolFib_g + diet_OCarb_g, data = meta_nogroups_brocc, 
+                      distance = "bray")
+RsquareAdj(rda_brocc)
+# 0.08 of variation explained by this model
+
+
+```
+
+```{r broccoli permanova best model}
+Perm_brocc <- adonis2(formula = MB_asvtab_brocc ~ diet_TotInsolFib_g + diet_OCarb_g, 
+                      data = meta_nogroups_brocc,
+                      method = "bray",
+                      by = "terms")
+Perm_brocc
+p.adjust(Perm_brocc$`Pr(>F)`, "fdr")
+
+# write.table(Perm_brocc,
+#             "../outputs/Perm_brocc_nogroups.txt",
+#             sep = "\t")
+
+```
+
+```{r broccoli rda graph}
+# create files for graphing
+smry_rda_brocc <- summary(rda_brocc)
+
+# this is the coordinates for the points and metadata
+meta_groups_filt_brocc <- meta_groups_brocc %>%
+  dplyr::select(c(subject_id, diet_TotInsolFib_g, diet_OCarb_g, group))
+brocc_PC1  <- data.frame(smry_rda_brocc$sites[,1:2]) %>%  # these are the x, y coordinates for the sample points
+  rownames_to_column("subject_id") %>%
+  inner_join(meta_groups_filt_brocc, by = "subject_id") %>%
+  column_to_rownames("subject_id")
+mylims <- range(with(brocc_PC1, c(CAP1, CAP2)))
+brocc_PC1$group <- as.factor(brocc_PC1$group)
+
+# the biplot scores are the correlations between your environmental variables and axes
+brocc_PC2  <- data.frame(smry_rda_brocc$biplot)
+
+# create hulls
+# hull_data <- brocc_PC1 %>%
+#   group_by(group) %>%
+#   slice(chull(CAP1, CAP2))
+
+# put plot together
+rda_plot_brocc <- ggplot(brocc_PC1, aes(x = CAP1, y = CAP2)) + 
+  geom_point(aes(color = group), size = 2) +
+  theme_classic() +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  geom_vline(xintercept = 0, linetype = "dotted") +
+  geom_segment(data = brocc_PC2, aes(x = 0, xend = CAP1, y = 0, yend = CAP2), 
+               color = "black", arrow = arrow(length = unit(0.01, "npc"))) +
+  geom_text(data = brocc_PC2, 
+            aes(x = CAP1, y = CAP2), label = c("Total Insoluble Fiber (g)",
+                                               "Other Carbs (g)"), 
+            color = "black", size = 4, hjust = c(0,1), vjust = c(0, 0.5)) +
+  # stat_ellipse(aes(linetype = group), position = "identity") +
+  labs(x = paste0("CAP1 (",round(100*smry_rda$cont$importance[2, "CAP1"], digits = 2),"%)"),
+       y = paste0("CAP2 (",round(100*smry_rda$cont$importance[2, "CAP2"], digits = 2),"%)")) +  
+  scale_color_brewer(palette = "Set1",
+                    name = "pre-treatment\nmicrobiome group") +
+  theme(text = element_text(size = 20))
+rda_plot_brocc
+
+# ggsave("../outputs/rda_plot_brocc_V2.png",
+#        width = 9,
+#        height = 6,
+#        dpi = 300)
+
+
+```
+
+## what could groups be correlated with?
+```{r groups correlated with other vars}
+# alfalfa and broccoli
+meta_groups_alfbrocc$group_numb[meta_groups_alfbrocc$group == "A"] <- 1
+meta_groups_alfbrocc$group_numb[meta_groups_alfbrocc$group == "B"] <- 2
+names(meta_groups_alfbrocc)
+
+lm_alfs <- lm(group_numb ~ sex + age + race + weight_lb + diet_condensed + cohort + ethnicity + height_in + sample_issue + diet_Chol_mg + diet_SatFat_g + diet_Alc_g + diet_TotSolFib_g + diet_MonSac_g + diet_Disacc_g + diet_BetaCaro_mcg + diet_Vit_B1_mg + diet_Vit_B6_mg + diet_Fol.DFE_mcg_DFE + diet_Mang_mg + diet_Copp_mg + diet_TotFib_g + diet_OCarb_g + diet_Iron_mg, 
+              data = meta_groups_alfbrocc)
+summary(lm_alfs)
+
+# raceAsian                   1.587e+00  8.646e-01   1.835   0.0755 .
+# raceDecline to state        2.244e+00  1.154e+00   1.944   0.0605 .
+# raceMTOR                    1.823e+00  9.864e-01   1.848   0.0736 .
+# raceOther                   2.438e+00  1.038e+00   2.349   0.0250 *
+# raceWhite                   1.465e+00  8.537e-01   1.716   0.0956 .
+# ethnicityNHL                9.577e-01  4.885e-01   1.961   0.0584 .
+# diet_Disacc_g               9.206e+01  4.132e+01   2.228   0.0328 *
+# diet_Mang_mg                3.301e+02  1.492e+02   2.212   0.0340 *
+
+# broccoli only
+meta_groups_brocc$group_numb[meta_groups_brocc$group == "A"] <- 1
+meta_groups_brocc$group_numb[meta_groups_brocc$group == "B"] <- 2
+meta_groups_brocc$group_numb[meta_groups_brocc$group == "C"] <- 3
+
+lm_brocc <- lm(group_numb ~ sex + age + race + weight_lb + diet_condensed + cohort + ethnicity + height_in + diet_Chol_mg + diet_SatFat_g + diet_Alc_g + diet_TotSolFib_g + diet_MonSac_g + diet_Disacc_g + diet_BetaCaro_mcg + diet_Vit_B1_mg + diet_Vit_B6_mg + diet_Fol.DFE_mcg_DFE + diet_Mang_mg + diet_Copp_mg + diet_TotFib_g + diet_OCarb_g + diet_Iron_mg, 
+              data = meta_groups_brocc)
+sum <- summary(lm_brocc)
+
+# age                         5.258e-02  1.609e-02   3.267  0.01710 *
+# raceAsian                   4.083e+00  1.782e+00   2.292  0.06180 .
+# raceMTOR                    4.792e+00  1.860e+00   2.577  0.04196 *
+# raceWhite                   4.484e+00  1.752e+00   2.560  0.04293 *
+# weight_lb                  -1.590e-02  7.742e-03  -2.053  0.08583 .
+# diet_condensedPescetarian  -2.774e+00  7.440e-01  -3.729  0.00975 **
+# diet_Alc_g                 -1.189e+02  5.092e+01  -2.336  0.05818 .
+# diet_TotSolFib_g           -2.037e+03  6.975e+02  -2.920  0.02663 *
+# diet_Disacc_g               2.432e+02  8.086e+01   3.008  0.02377 *
+# diet_TotFib_g              -1.486e+02  6.761e+01  -2.198  0.07028 .
+write.table(sum$coefficients, "../outputs/Pred2_grpLMs.txt")
+
+
+
+```
+
+
+## Permanova on each group
+# group A
+```{r broccoli ordistep for dbRDA group A}
+meta_groupA_brocc <- meta_groups_brocc %>%
+  dplyr::filter(group == "A") %>%
+  dplyr::select(-c(group, group_numb, ethnicity, relation, height_in, weight_lb)) %>%
+  column_to_rownames("subject_id")
+MB_asvtab_broccA <- MB_asvtab_brocc %>%
+  rownames_to_column("subject_id") %>%
+  dplyr::filter(subject_id %in% rownames(meta_groupA_brocc)) %>%
+  column_to_rownames("subject_id")
+Abroccmod0 <- capscale(MB_asvtab_broccA ~ 1, meta_groupA_brocc, distance = "bray")  # Model with intercept only
+Abroccmod1 <- capscale(MB_asvtab_broccA ~ . + .*., meta_groupA_brocc, distance = "bray")  # Model with all explanatory variables
+ordibroccA <- ordistep(Abroccmod0, scope = formula(Abroccmod1)) # this determines what the best model is to run RDA on
+ordibroccA
+# best model is MB_asvtab_broccA ~ bmi + diet_Alc_g
+# model inertia was 0.6843 (low, not great); Inertia is squared Bray distance
+
+
+```
+
+```{r broccoli dbRDA run with best model from ordistep group A}
+# calculate RDA (distance based)
+rda_broccA <- capscale(formula = MB_asvtab_broccA ~ bmi + diet_Alc_g, 
+                      data = meta_groupA_brocc, 
+                      distance = "bray")
+RsquareAdj(rda_broccA)
+# 0.17 of variation explained by this model
+summary(rda_broccA)
+
+plot(rda_broccA)
+
+```
+
+```{r broccoli permanova best model group A}
+Perm_broccA <- adonis2(MB_asvtab_broccA ~ bmi + diet_Alc_g, 
+                            data = meta_groupA_brocc,
+                       method = "bray",
+                       by = "terms")
+Perm_broccA
+p.adjust(Perm_broccA$`Pr(>F)`, method = "fdr")
+
+# write.table(Perm_broccA,
+#             "../outputs/Perm_broccA.txt",
+#             sep = "\t")
+
+```
+
+
+# group B
+```{r broccoli ordistep for dbRDA group A}
+meta_groupB_brocc <- meta_groups_brocc %>%
+  dplyr::filter(group == "B") %>%
+  dplyr::select(-c(group, group_numb, ethnicity, relation, height_in, weight_lb)) %>%
+  column_to_rownames("subject_id")
+MB_asvtab_broccB <- MB_asvtab_brocc %>%
+  rownames_to_column("subject_id") %>%
+  dplyr::filter(subject_id %in% rownames(meta_groupB_brocc)) %>%
+  column_to_rownames("subject_id")
+Bbroccmod0 <- capscale(MB_asvtab_broccB ~ 1, meta_groupB_brocc, distance = "bray")  # Model with intercept only
+Bbroccmod1 <- capscale(MB_asvtab_broccB ~ . + .*., meta_groupB_brocc, distance = "bray")  # Model with all explanatory variables
+ordibroccB <- ordistep(Bbroccmod0, scope = formula(Bbroccmod1)) # this determines what the best model is to run RDA on
+ordibroccB
+# best model is MB_asvtab_broccB ~ race + diet_Vit_B6_mg + diet_Vit_B1_mg +
+# race:diet_Vit_B1_mg
+# model inertia was 1.91939; Inertia is squared Bray distance
+
+
+```
+
+```{r broccoli dbRDA run with best model from ordistep group A}
+# calculate RDA (distance based)
+rda_broccB <- capscale(formula = MB_asvtab_broccB ~ race + diet_Vit_B6_mg + diet_Vit_B1_mg +
+race:diet_Vit_B1_mg, 
+                      data = meta_groupB_brocc, 
+                      distance = "bray")
+RsquareAdj(rda_broccB)
+# 0.3 of variation explained by this model
+# race other and race white are collinear with vitamin B1
+summary(rda_broccB)
+
+plot(rda_broccB)
+
+```
+
+```{r broccoli permanova best model group A}
+Perm_broccB <- adonis2(MB_asvtab_broccB ~ race + diet_Vit_B6_mg + diet_Vit_B1_mg +
+race:diet_Vit_B1_mg, 
+                            data = meta_groupB_brocc,
+                       method = "bray",
+                       by = "terms")
+Perm_broccB
+p.adjust(Perm_broccB$`Pr(>F)`, method = "fdr")
+
+# write.table(Perm_broccB,
+#             "../outputs/Perm_broccB.txt",
+#             sep = "\t")
+
+```
+
+# group C 
+```{r broccoli ordistep for dbRDA group A}
+meta_groupC_brocc <- meta_groups_brocc %>%
+  dplyr::filter(group == "C") %>%
+  dplyr::select(-c(group, group_numb, ethnicity, relation, height_in, weight_lb)) %>%
+  column_to_rownames("subject_id")
+MB_asvtab_groupC <- MB_asvtab_brocc %>%
+  rownames_to_column("subject_id") %>%
+  dplyr::filter(subject_id %in% rownames(meta_groupC_brocc)) %>%
+  column_to_rownames("subject_id")
+Cbroccmod0 <- capscale(MB_asvtab_groupC ~ 1, meta_groupC_brocc, distance = "bray")  # Model with intercept only
+Cbroccmod1 <- capscale(MB_asvtab_groupC ~ . + .*., meta_groupC_brocc, distance = "bray")  # Model with all explanatory variables
+ordigroupC <- ordistep(Cbroccmod0, scope = formula(Cbroccmod1)) # this determines what the best model is to run RDA on
+ordigroupC
+# best model is MB_asvtab_groupC ~ diet_Fol.DFE_mcg_DFE
+# model inertia was 0.4030 (low, not great); Inertia is squared Bray distance
+
+
+```
+
+```{r broccoli dbRDA run with best model from ordistep group A}
+# calculate RDA (distance based)
+rda_groupC <- capscale(formula = MB_asvtab_groupC ~ diet_Fol.DFE_mcg_DFE, 
+                      data = meta_groupC_brocc, 
+                      distance = "bray")
+RsquareAdj(rda_groupC)
+# 0.19 of variation explained by this model
+summary(rda_groupC)
+
+plot(rda_groupC)
+
+```
+
+```{r broccoli permanova best model group A}
+Perm_groupC <- adonis2(MB_asvtab_groupC ~ diet_Fol.DFE_mcg_DFE, 
+                            data = meta_groupC_brocc,
+                       method = "bray",
+                       by = "terms")
+Perm_groupC
+p.adjust(Perm_groupC$`Pr(>F)`, method = "fdr")
+
+# write.table(Perm_groupC,
+#             "../outputs/Perm_groupC.txt",
+#             sep = "\t")
+
+```
+
+## save image chunk 
+```{r save env, eval = F}
+save.image("/Users/alexieva/Documents/Projects/Analysis/broccoli project/02_pubAnalysis/Enterotyping/broccolipreMBpermanova.RData")
+
+```
+
+
+
+
+
+

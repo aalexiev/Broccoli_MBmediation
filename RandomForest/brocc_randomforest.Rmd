@@ -1,0 +1,503 @@
+---
+title: "broccoli random forest"
+author: "Alexandra Alexiev"
+date: "2024-11-18"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+# knit options for whole doc. I will add in specific chunks when I don't want this to be the case
+knitr::opts_chunk$set(echo = TRUE, # show code
+                      eval = TRUE, # run chunks when knitting
+                      include = TRUE, # include chunk input in final doc
+                      warning = FALSE, # do not show warnings in final doc
+                      message = FALSE, # do not show messages from code in final doc
+                      collapse = TRUE, # when possible, do put multiple outputs in one block
+                      dpi = 300, # fig resolution
+                      fig.dim = c(9, 5), # the default figure dimensions
+                      out.width = "98%", # the default figure output width
+                      out.height = "98%", # the default figure output height 
+                      cache = TRUE) # dont rerun chunks that haven't been changed
+
+```
+
+
+## libraries and directories
+
+```{r libraries}
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(randomForest)
+set.seed(3)
+
+```
+
+
+```{r set working dir, eval=F}
+setwd("/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/brocc_randomforest/")
+
+load("/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/brocc_randomforest/brocc_randomforest.RData")
+
+```
+
+## Input files prep
+
+We want an input file that has the "features" we want to test the importance of vs the samples. The features we want there are the microbial taxa followed by the SFN data.
+```{r file input and clean up}
+## input microbiome taxa table
+MB_asvtab <- read.delim("/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/input_data/MBasvtab_brocc_cleanT0.txt") %>%
+  rownames_to_column("subject_id")
+
+## input SFN data but combine with asv tab
+SFN_tab <- read.delim("/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/input_data/Urine_SFN_cumul.txt")
+
+# no NA's?
+sum(!complete.cases(MB_asvtab))
+sum(!complete.cases(SFN_tab))
+# yes
+
+# for now test with just SFN_cumulative data
+feat_tab <- MB_asvtab %>%
+  inner_join(SFN_tab[c("subject_id", "sum_SFN")], by = "subject_id") %>%
+  column_to_rownames("subject_id")
+
+```
+
+## Split into train and validation set of data
+```{r train and validation set split}
+# Training Set : Validation Set = 70 : 30 (random)
+train <- sample(nrow(feat_tab), 0.7*nrow(feat_tab), replace = FALSE)
+TrainSet <- feat_tab[train,]
+ValidSet <- feat_tab[-train,]
+summary(TrainSet)
+summary(ValidSet)
+
+
+```
+
+## create random forest model to test which taxa are associated with cumulative SFN
+- default uses 500 trees
+- regression model
+
+```{r create default random forest model on training set}
+# Create a Random Forest model with default parameters
+model1 <- randomForest(sum_SFN ~ ., data = TrainSet, importance = TRUE)
+model1
+round(importance(model1), 2)
+
+# Get variable importance from the model fit
+ImpData <- as.data.frame(importance(model1))
+ImpData$Var.Names <- row.names(ImpData)
+
+ggplot(ImpData, aes(x=Var.Names, y=`%IncMSE`)) +
+  geom_segment( aes(x=Var.Names, xend=Var.Names, y=0, yend=`%IncMSE`), color="skyblue") +
+  geom_point(aes(size = IncNodePurity), color="blue", alpha=0.6) +
+  theme_light() +
+  coord_flip() +
+  theme(
+    legend.position="bottom",
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+# ggsave("import_graph_train.png",
+#        dpi = 300, height = 13,
+#        width = 8)
+
+# calculate RMSE of train data
+sqrt(model1$mse[length(model1$mse)]) # want to be low
+
+# calculate RMSE of test data
+predValues <- predict(model1, ValidSet)
+sqrt(mean((ValidSet$sum_SFN - predValues)^2))
+
+# low so good rmse
+
+R2 <- 1 - (sum((ValidSet$sum_SFN-predValues)^2)/sum((ValidSet$sum_SFN-mean(ValidSet$sum_SFN))^2))
+# not a great fit for data
+
+# can't do more mtry's because it's already 37 (and there are 38 observations)
+# couldn't make it a better fit by changing ntree
+
+# find number of trees that produced lowest test MSE
+which.min(model1$mse)
+
+# RMSE of best model
+sqrt(model1$mse[which.min(model1$mse)])
+
+#plot the test MSE by number of trees
+plot(model1)
+
+```
+
+```{r run full model}
+model2 <- randomForest(formula = sum_SFN ~ . , data = feat_tab, importance = TRUE)
+model2 # not much different than train model
+
+# find number of trees that produced lowest test MSE
+which.min(model2$mse)
+# 54 trees best, but this changes every time I run it
+
+# RMSE of best model
+sqrt(model1$mse[which.min(model2$mse)])
+# 9.05 is best mse
+
+#plot the test MSE by number of trees
+plot(model2)
+
+# Get variable importance from the model fit
+ImpData <- as.data.frame(importance(model2))
+ImpData$Var.Names <- row.names(ImpData)
+
+ggplot(ImpData, aes(x=Var.Names, y=`%IncMSE`)) +
+  geom_segment( aes(x=Var.Names, xend=Var.Names, y=0, yend=`%IncMSE`), color="skyblue") +
+  geom_point(aes(size = IncNodePurity), color="blue", alpha=0.6) +
+  theme_light() +
+  coord_flip() +
+  theme(
+    legend.position="bottom",
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+# ggsave("import_graph.png",
+#        dpi = 300, height = 13,
+#        width = 8)
+
+
+```
+
+optimize model:
+- ntreeTry: The number of trees to build.
+- mtryStart: The starting number of predictor variables to consider at each split.
+- stepFactor: The factor to increase by until the out-of-bag estimated error stops improving by a certain amount.
+- improve: The amount that the out-of-bag error needs to improve by to keep increasing the step factor.
+```{r optimize/tune the rf model}
+model_tuned <- tuneRF(
+               x=feat_tab[,-1], #define predictor variables
+               y=feat_tab$sum_SFN, #define response variable
+               ntreeTry=500,
+               mtryStart=4, 
+               stepFactor=1.5,
+               improve=0.01,
+               trace=FALSE #don't show real-time progress
+               )
+# 111 predictors at each split will give best OOB
+
+```
+
+```{r rerun rf model with new information about best number of predictors}
+model3 <- randomForest(formula = sum_SFN ~ . , data = feat_tab, importance = TRUE, mtry = 111)
+model3 # not much different than train model
+
+# find number of trees that produced lowest test MSE
+which.min(model3$mse)
+# 179 trees best, but this changes every time I run it
+
+# RMSE of best model
+sqrt(model1$mse[which.min(model3$mse)])
+# 8.99 is best mse
+
+# r squared
+predValues <- 
+R2 <- 1 - (sum((ValidSet$sum_SFN-predValues)^2)/sum((ValidSet$sum_SFN-mean(ValidSet$sum_SFN))^2))
+# not a great fit for data
+
+#plot the test MSE by number of trees
+plot(model3)
+
+# Get variable importance from the model fit
+ImpData <- as.data.frame(importance(model3)) %>%
+  rename_at('%IncMSE', ~'percIncMSE') %>%
+  dplyr::filter(percIncMSE > 0)
+ImpData$Var.Names <- row.names(ImpData)
+
+ggplot(ImpData, aes(x=Var.Names, y=`percIncMSE`)) +
+  geom_segment( aes(x=Var.Names, xend=Var.Names, y=0, yend=`percIncMSE`), color="skyblue") +
+  geom_point(aes(size = IncNodePurity), color="blue", alpha=0.6) +
+  theme_light() +
+  coord_flip() +
+  theme(
+    legend.position="bottom",
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+# ggsave("import_graph_optimtestmod.png",
+#        dpi = 300, height = 9,
+#        width = 8)
+
+# another verison of importance plot
+varImpPlot(model3, 
+           sort=FALSE, 
+           main="Variable Importance Plot")
+
+
+```
+
+
+## random forest model to test whether the presence or absence of certain taxa is associated with cumulative SFN
+
+```{r convert asv table into precense absence}
+MB_asvtab_pa <- column_to_rownames(MB_asvtab, "subject_id")
+MB_asvtab_pa <- as.data.frame(ifelse(MB_asvtab_pa == 0, "A", "P")) %>%
+  rownames_to_column("subject_id") %>%
+  inner_join(SFN_tab[c("subject_id", "sum_SFN")], by = "subject_id") %>%
+  column_to_rownames("subject_id")
+
+```
+
+```{r split microbiome group data into train and valid set}
+# Training Set : Validation Set = 70 : 30 (random)
+train <- sample(nrow(MB_asvtab_pa), 0.7*nrow(MB_asvtab_pa), replace = FALSE)
+TrainSet <- MB_asvtab_pa[train,]
+ValidSet <- MB_asvtab_pa[-train,]
+summary(TrainSet)
+summary(ValidSet)
+
+
+```
+
+```{r create default random forest model on training set}
+# Create a Random Forest model with default parameters
+model1 <- randomForest(sum_SFN ~ ., data = TrainSet, importance = TRUE, type = "class")
+model1
+
+R2 <- 1 - (sum((ValidSet$sum_SFN-predValues)^2)/sum((ValidSet$sum_SFN-mean(ValidSet$sum_SFN))^2))
+# negative, not a great fit for data
+
+# find number of trees that produced lowest test MSE
+which.min(model1$mse)
+# 500
+
+# RMSE of best model
+sqrt(model1$mse[which.min(model1$mse)])
+# 7.4
+
+```
+
+```{r run full model}
+model2 <- randomForest(formula = sum_SFN ~ . , data = MB_asvtab_pa, importance = TRUE)
+model2 # not much different than train model
+
+# find number of trees that produced lowest test MSE
+which.min(model2$mse)
+# 106 trees best
+
+# RMSE of best model
+sqrt(model1$mse[which.min(model2$mse)])
+# 7.7 is best mse
+
+#plot the test MSE by number of trees
+plot(model2)
+
+
+```
+
+optimize model:
+- ntreeTry: The number of trees to build.
+- mtryStart: The starting number of predictor variables to consider at each split.
+- stepFactor: The factor to increase by until the out-of-bag estimated error stops improving by a certain amount.
+- improve: The amount that the out-of-bag error needs to improve by to keep increasing the step factor.
+```{r optimize/tune the rf model}
+model_tuned <- tuneRF(
+               x=MB_asvtab_pa[,-112], #define predictor variables
+               y=MB_asvtab_pa$sum_SFN, #define response variable
+               ntreeTry=500,
+               mtryStart=2, 
+               stepFactor=1.5,
+               improve=0.01,
+               trace=FALSE #don't show real-time progress
+               )
+# 2 predictors at each split will give best OOB
+
+```
+
+```{r rerun rf model with new information about best number of predictors}
+model3 <- randomForest(formula = sum_SFN ~ . , data = MB_asvtab_pa, importance = TRUE, mtry = 2)
+model3 # not much different than train model
+
+# find number of trees that produced lowest test MSE
+which.min(model3$mse)
+# 29 trees best, but this changes every time I run it
+
+# RMSE of best model
+sqrt(model3$mse[which.min(model3$mse)])
+# 7.8 is best mse
+
+# r squared
+predValues <- predict(model3, ValidSet)
+R2 <- 1 - (sum((ValidSet$sum_SFN-predValues)^2)/sum((ValidSet$sum_SFN-mean(ValidSet$sum_SFN))^2))
+# pretty mid
+
+#plot the test MSE by number of trees
+plot(model3)
+
+# Get variable importance from the model fit
+ImpData <- as.data.frame(model3[["importance"]]) %>%
+  rename_at('%IncMSE', ~'percIncMSE') %>%
+  dplyr::filter(percIncMSE > 0)
+ImpData$Var.Names <- row.names(ImpData)
+
+ggplot(ImpData, aes(x=Var.Names, y=`percIncMSE`)) +
+  geom_segment( aes(x=Var.Names, xend=Var.Names, y=0, yend=`percIncMSE`), color="skyblue") +
+  geom_point(aes(size = IncNodePurity), color="blue", alpha=0.6) +
+  theme_light() +
+  coord_flip() +
+  theme(
+    legend.position="bottom",
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+# ggsave("import_graph_optimtestmod_presabstaxa.png",
+#        dpi = 300, height = 8,
+#        width = 8)
+
+# another verison of importance plot
+varImpPlot(model3, 
+           sort=FALSE, 
+           main="Variable Importance Plot")
+
+
+```
+
+## random forest model to test whether microbiome grouping is more important than dietary params in determining SFN metrics in broccoli consumers
+```{r input data with microbiome groups}
+MB_wgroups <- read.delim("meta_groups_brocc.txt", header = T, sep = " ") %>%
+  dplyr::select(-c("group_numb", "sample", "treatment", "relation")) %>%
+  inner_join(SFN_tab[c("subject_id", "sum_SFN")], by = "subject_id") %>%
+  column_to_rownames("subject_id")
+
+
+```
+
+```{r split microbiome group data into train and valid set}
+# Training Set : Validation Set = 70 : 30 (random)
+train <- sample(nrow(MB_wgroups), 0.7*nrow(MB_wgroups), replace = FALSE)
+TrainSet <- MB_wgroups[train,]
+ValidSet <- MB_wgroups[-train,]
+summary(TrainSet)
+summary(ValidSet)
+
+
+```
+
+```{r create default random forest model on training set}
+# Create a Random Forest model with default parameters
+model1 <- randomForest(sum_SFN ~ ., data = TrainSet, importance = TRUE)
+model1
+
+R2 <- 1 - (sum((ValidSet$sum_SFN-predValues)^2)/sum((ValidSet$sum_SFN-mean(ValidSet$sum_SFN))^2))
+# negative, not a great fit for data
+
+# find number of trees that produced lowest test MSE
+which.min(model1$mse)
+# 1
+
+# RMSE of best model
+sqrt(model1$mse[which.min(model1$mse)])
+# 7.1
+
+```
+
+```{r run full model}
+model2 <- randomForest(formula = sum_SFN ~ . , data = MB_wgroups, importance = TRUE)
+model2 # not much different than train model
+
+# find number of trees that produced lowest test MSE
+which.min(model2$mse)
+# 136 trees best
+
+# RMSE of best model
+sqrt(model1$mse[which.min(model2$mse)])
+# 9.7 is best mse
+
+#plot the test MSE by number of trees
+plot(model2)
+
+
+```
+
+optimize model:
+- ntreeTry: The number of trees to build.
+- mtryStart: The starting number of predictor variables to consider at each split.
+- stepFactor: The factor to increase by until the out-of-bag estimated error stops improving by a certain amount.
+- improve: The amount that the out-of-bag error needs to improve by to keep increasing the step factor.
+```{r optimize/tune the rf model}
+model_tuned <- tuneRF(
+               x=MB_wgroups[,-1], #define predictor variables
+               y=MB_wgroups$sum_SFN, #define response variable
+               ntreeTry=500,
+               mtryStart=2, 
+               stepFactor=1.5,
+               improve=0.01,
+               trace=FALSE #don't show real-time progress
+               )
+# 27 predictors at each split will give best OOB
+
+```
+
+```{r rerun rf model with new information about best number of predictors}
+model3 <- randomForest(formula = sum_SFN ~ . , data = MB_wgroups, importance = TRUE, mtry = 27)
+model3 # not much different than train model
+
+# find number of trees that produced lowest test MSE
+which.min(model3$mse)
+# 1 tree best, but this changes every time I run it
+
+# RMSE of best model
+sqrt(model3$mse[which.min(model3$mse)])
+# 5.5 is best mse
+
+# r squared
+predValues <- predict(model3, ValidSet)
+R2 <- 1 - (sum((ValidSet$sum_SFN-predValues)^2)/sum((ValidSet$sum_SFN-mean(ValidSet$sum_SFN))^2))
+# pretty high
+
+#plot the test MSE by number of trees
+plot(model3)
+
+# Get variable importance from the model fit
+ImpData <- as.data.frame(model3[["importance"]]) %>%
+  rename_at('%IncMSE', ~'percIncMSE') %>%
+  dplyr::filter(percIncMSE > 0)
+ImpData$Var.Names <- row.names(ImpData)
+
+ggplot(ImpData, aes(x=Var.Names, y=`percIncMSE`)) +
+  geom_segment( aes(x=Var.Names, xend=Var.Names, y=0, yend=`percIncMSE`), color="skyblue") +
+  geom_point(aes(size = IncNodePurity), color="blue", alpha=0.6) +
+  theme_light() +
+  coord_flip() +
+  theme(
+    legend.position="bottom",
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+# ggsave("importgraph_optimtestmod_AllvarsMBgroupSFN.png",
+#        dpi = 300, height = 4,
+#        width = 5)
+
+# another verison of importance plot
+varImpPlot(model3, 
+           sort=FALSE, 
+           main="Variable Importance Plot")
+
+
+```
+
+
+## save environment
+```{r save env, eval = F}
+save.image("brocc_randomforest.RData")
+
+```

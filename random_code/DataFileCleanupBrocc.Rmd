@@ -1,0 +1,127 @@
+---
+title: "DataFileCleanupBrocc"
+author: "Alexandra Alexiev"
+date: "2024-08-13"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+# knit options for whole doc. I will add in specific chunks when I don't want this to be the case
+knitr::opts_chunk$set(echo = TRUE, # show code
+                      eval = TRUE, # run chunks when knitting
+                      include = TRUE, # include chunk input in final doc
+                      warning = FALSE, # do not show warnings in final doc
+                      message = FALSE, # do not show messages from code in final doc
+                      collapse = TRUE, # when possible, do put multiple outputs in one block
+                      dpi = 300, # fig resolution
+                      fig.dim = c(9, 5), # the default figure dimensions
+                      out.width = "98%", # the default figure output width
+                      out.height = "98%", # the default figure output height 
+                      cache = TRUE) # dont rerun chunks that haven't been changed
+
+```
+
+## libraries and directories
+
+```{r libraries}
+library(dplyr)
+library(tibble)
+library(tidyr)
+set.seed(3)
+
+```
+
+```{r set working dir, eval=F}
+setwd("/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/")
+
+input_folder <- "/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/input_data/"
+
+```
+
+
+## Microbiome data
+- time 24 hr microbiome data filtered
+- aggregate read counts by Genus
+
+```{r MB data}
+# taxa table
+MB_taxtab <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/Microbiome_Flat/TaxTable_BSS.csv",
+                      header = TRUE) 
+
+# metadata for microbiome stuff
+metadata <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/Microbiome_Flat/SampleData_BSS.csv",
+                      header = TRUE) %>%
+  dplyr::filter(time == 24, veg == "broc") # for now just Time 24 data and only broccoli consumers
+
+# ASV table (ASV reads per sample)
+MB_asvtab <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/Microbiome_Flat/ASVTable_BSS.csv",
+                      header = TRUE) %>%
+  dplyr::filter(sample %in% metadata$sample) # just time 0 data
+
+# clean up subject ID names so they will match the metadata
+MB_asvtab$sample <- sub("_[^_]+_[^_]+$", "", MB_asvtab$sample)
+
+# rename the ASVs by their taxonomy (genus level)
+MB_asvtab <-as.data.frame(t(column_to_rownames(MB_asvtab, "sample")))
+MB_asvtab$Genus[which(rownames(MB_asvtab) == MB_taxtab$ASV)] <- MB_taxtab$Genus
+MB_asvtab <- MB_asvtab %>%
+  group_by(Genus) %>%
+  summarise(across(where(is.numeric), sum)) %>%
+  t() %>%
+  as.data.frame()
+colnames(MB_asvtab) <- MB_asvtab[1,]
+MB_asvtab <- MB_asvtab[-1,]
+MB_asvtab <- MB_asvtab[order(rownames(MB_asvtab)),]
+
+
+```
+
+```{r save MB objects}
+write.table(MB_asvtab, paste0(input_folder, "MB_asvtab_24hr.txt"))
+write.table(metadata, paste0(input_folder, "brocc_metadata_24hr.txt"))
+
+```
+
+
+
+## SFN data
+- from Urine
+- 24 hr data, Laura suggested this is best time point to use as it is the peak
+- SFN and SFN-NIT most correlated with broccoli consumption according to Laura
+```{r}
+Urine_SFN <- read.table("/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/Urine_tab_rawlong.txt", header = TRUE) %>%
+  dplyr::filter(time == 24 & SFN_metabolites == "SFN" | time == 24 & SFN_metabolites == "SFN_NIT") %>%
+  spread(key = "SFN_metabolites", value = "quantity") %>%
+  dplyr::select(-time)
+
+
+```
+
+```{r save MB objects}
+write.table(Urine_SFN, paste0(input_folder, "Urine_SFN_rawlong.txt"))
+
+
+```
+
+## Diet composition data
+- based on Yanni's previous research
+- taken in the weeks leading up to Time 0 experiment
+```{r diet comp}
+diet_compnts <- c("diet_Chol_mg", "diet_SatFat_g", "diet_Alc_g", "diet_TotSolFib_g", 
+                  "diet_MonSac_g", "diet_Disacc_g", "diet_BetaCaro_mcg", "diet_Vit_B1_mg",
+                  "diet_Vit_B6_mg", "diet_Fol.DFE_mcg_DFE", "diet_Mang_mg", "diet_Copp_mg", 
+                  "diet_TotFib_g", "diet_OCarb_g", "diet_Iron_mg")
+
+diet <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/Diet/Diet_Small.csv", header = TRUE) %>%
+  dplyr::select(c("subject_id", all_of(diet_compnts)))
+
+
+```
+
+```{r save MB objects}
+write.table(diet, paste0(input_folder, "diet_filtered.txt"))
+
+
+```
+
+

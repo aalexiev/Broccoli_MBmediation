@@ -1,0 +1,564 @@
+---
+title: "brocc mediation on time 0 clusters"
+author: "Alexandra Alexiev"
+date: "2024-07-09"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+# knit options for whole doc. I will add in specific chunks when I don't want this to be the case
+knitr::opts_chunk$set(echo = TRUE, # show code
+                      eval = TRUE, # run chunks when knitting
+                      include = TRUE, # include chunk input in final doc
+                      warning = FALSE, # do not show warnings in final doc
+                      message = FALSE, # do not show messages from code in final doc
+                      collapse = TRUE, # when possible, do put multiple outputs in one block
+                      dpi = 300, # fig resolution
+                      fig.dim = c(9, 5), # the default figure dimensions
+                      out.width = "98%", # the default figure output width
+                      out.height = "98%", # the default figure output height 
+                      cache = TRUE) # dont rerun chunks that haven't been changed
+
+```
+
+
+## libraries and directories
+
+```{r libraries}
+library(tidyverse)
+library(ggplot2)
+library(vegan)
+library(mediation)
+library(ggfortify)
+library(ggpubr)
+library(tweedie)
+library(statmod)
+library(AICcmodavg)
+library(RColorBrewer)
+set.seed(3)
+
+```
+
+
+```{r set working dir, eval=F}
+setwd("/Users/alexieva/Documents/Projects/Analysis/broccoli project/02_pubAnalysis/Prediction2_mediation")
+
+load("/Users/alexieva/Documents/Projects/Analysis/broccoli project/02_pubAnalysis/Prediction2_mediation/brocc_clustermediation.RData")
+
+```
+
+## Input data
+```{r input microbiome asv table, urine SFN data, and diet data}
+## microbiome data
+# taxa table
+MB_taxtab <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/Microbiome_Flat/TaxTable_BSS.csv",
+                      header = TRUE) 
+
+# metadata for microbiome stuff
+metadata <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/Microbiome_Flat/SampleData_BSS.csv",
+                      header = TRUE) %>%
+  dplyr::filter(time == 0) %>% # for now just Time 0 data
+  mutate(broc_consum = case_when(veg == "broc" ~ "1",
+                                 veg == "alf" ~ "0"))
+
+# ASV table (ASV reads per sample)
+MB_asvtab <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/Microbiome_Flat/ASVTable_BSS.csv",
+                      header = TRUE) %>%
+  dplyr::filter(sample %in% metadata$sample) # just time 0 data
+
+# clean up subject ID names so they will match the metadata
+MB_asvtab$sample <- sub("_[^_]+_[^_]+$", "", MB_asvtab$sample)
+
+# rename the ASVs by their taxonomy (genus level)
+MB_asvtab <-as.data.frame(t(column_to_rownames(MB_asvtab, "sample")))
+MB_asvtab$Genus[which(rownames(MB_asvtab) == MB_taxtab$ASV)] <- MB_taxtab$Genus
+MB_asvtab <- MB_asvtab %>%
+  group_by(Genus) %>%
+  summarise(across(where(is.numeric), sum)) %>%
+  column_to_rownames("Genus") %>%
+  t() %>%
+  as.data.frame()
+
+
+```
+
+```{r SFN data}
+## SFN data
+# filtering just timepoint 24 hours, as per Laura Beaver's observations that this was the peak SFN and SFN-NIT output in urine
+# filtering just SFN and SFN-NIT because those were the significantly correlated ones to broccoli consumption in Dr. Beaver's previous analysis
+## SFN data
+
+Urine_SFN <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/SFN_Data/Urine_R_Format.csv",
+                      header = TRUE) %>%
+    group_by(subject_id) %>%
+  summarise(sum_SFN = sum(SFN),
+            sum_SFN_Cys = sum(SFN_Cys),
+            sum_SFN_NAC = sum(SFN_NAC),
+            sum_SFN_CG = sum(SFN_CG),
+            sum_SFN_GSH = sum(SFN_GSH),
+            sum_SFN_NIT = sum(SFN_NIT),
+            sum_SFN_Tot = sum(SFN_Tot))
+
+# make a mega metadata file
+mega_meta <- inner_join(metadata, Urine_SFN, by = "subject_id")
+mega_meta <- mega_meta[order(mega_meta$subject_id),] # this also takes out the alfalfa eaters
+
+```
+
+```{r diet data}
+## diet data
+# make a list of the "significant" diet factors we are interested in 
+diet_compnts <- c("diet_Chol_mg", "diet_SatFat_g", "diet_Alc_g", "diet_TotSolFib_g", 
+                  "diet_MonSac_g", "diet_Disacc_g", "diet_BetaCaro_mcg", "diet_Vit_B1_mg",
+                  "diet_Vit_B6_mg", "diet_Fol.DFE_mcg_DFE", "diet_Mang_mg", "diet_Copp_mg", 
+                  "diet_TotFib_g", "diet_OCarb_g", "diet_Iron_mg", "diet_TotInsolFib_g")
+diet <- read.csv("/Users/alexieva/Documents/Projects/Analysis/broccoli project/00_data/Diet/New_Diet_Small.csv", header = TRUE) %>%
+  dplyr::select(c("subject_id", all_of(diet_compnts)))
+
+```
+
+```{r cluster beta diversity}
+bray_nmds <- metaMDS(as.matrix(MB_asvtab), distance = "bray", 
+                     k = 3, trymax = 100)
+bray_nmds$stress # is less than 0.2 so good stress
+
+ordiplot(bray_nmds) # no clear groupings/clusters
+
+d <- vegdist(MB_asvtab, method = "bray") # calc bray curtis dist
+hc <- hclust(d, method = "complete") # cluster dendrogram
+plot(hc) # looks like five groups could be made at a macro level
+
+groups <- as.data.frame(cutree(hc, 5)) # assign 1-5 group IDs to each sample ID based on hclust
+names(groups) <- "group"
+# combine with metadata for graphing
+meta_groups <- groups %>%
+  rownames_to_column("subject_id") %>%
+  inner_join(metadata, by = "subject_id")
+
+# is diet related to BC dissimilarity?
+adonis2(d ~ diet_TotFib_g, data = diet, method = "bray")
+# yes
+adonis2(d ~ diet_TotSolFib_g, data = diet, method = "bray")
+# yes
+
+# loop through all
+out <- data.frame(matrix(ncol = 3, nrow = 0))
+colnames(out) <- c("name", "r2", "p")
+j <- 1
+for (i in 1:length(diet_compnts)) {
+  diet2 <- diet %>% dplyr::mutate(comp = diet[[diet_compnts[i]]])
+  perm <- adonis2(d ~ comp, data = diet2, method = "bray")
+  if (perm$`Pr(>F)`[1] <= 0.05) {
+    out[j,1] <- diet_compnts[i]
+    out[j,2] <- perm$R2[1]
+    out[j,3] <- perm$`Pr(>F)`[1]
+    j <- j + 1
+  }
+}
+
+out
+
+
+```
+
+## a more precise way of determining clusters and number of clusters
+K means with silhouette score
+```{r k means}
+library(cluster) 
+library(factoextra)
+
+## with alfalfa eaters
+fviz_nbclust(MB_asvtab, kmeans, method = 'silhouette')
+
+# 2 is actualy the optimal clustering for the ASV matrix
+
+## without alfalfa eaters (only brocc)
+fviz_nbclust(MB_asvtab_filt, kmeans, method = 'silhouette')
+
+# 3 is actualy the optimal clustering for the ASV matrix
+
+
+```
+
+
+## Mediation with cluster
+
+```{r combine above separate data constructs into one with all info necessary for model}
+# match data based on subject id
+# filter only broccoli eaters now
+groups <- kmeans(MB_asvtab_filt, centers = 3, nstart = 25)
+groups_r <- as.data.frame(groups$cluster) %>%
+  rownames_to_column("subject_id")
+names(groups_r)[names(groups_r) == 'groups$cluster'] <- 'group'
+meta_filt <- metadata[which(metadata$veg == "broc"),]
+
+med_input <- MB_asvtab %>%
+  rownames_to_column("subject_id") %>%
+  dplyr::filter(subject_id %in% meta_filt$subject_id) %>%
+  inner_join(Urine_SFN, by = "subject_id") %>%
+  inner_join(diet, by = "subject_id") %>%
+  inner_join(groups_r, by = "subject_id")
+
+med_input$group[med_input$group == 1] <- "A"
+med_input$group[med_input$group == 2] <- "B"
+med_input$group[med_input$group == 3] <- "C"
+
+
+```
+
+```{r save input files for other analyses}
+# metadata table with groups including alfalfa eaters
+groups_alf <- kmeans(MB_asvtab, centers = 2, nstart = 25)
+groups_r_alf <- as.data.frame(groups_alf$cluster) %>%
+  rownames_to_column("subject_id")
+meta_groups <- metadata %>%
+  inner_join(groups_r_alf, by = "subject_id")
+meta_groups$group[meta_groups$group == 1] <- "A"
+meta_groups$group[meta_groups$group == 2] <- "B"
+# write.table(meta_groups,
+#             "/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/brocc_mediation_Rfiles/inputs/meta_groups_alfbrocc.txt",
+#             sep = "\t")
+
+# metadata table with groups 
+meta_groups_brocc <- meta_filt %>%
+  inner_join(groups_r, by = "subject_id")
+meta_groups_brocc$group[meta_groups_brocc$group == 1] <- "A"
+meta_groups_brocc$group[meta_groups_brocc$group == 2] <- "B"
+meta_groups_brocc$group[meta_groups_brocc$group == 3] <- "C"
+# write.table(meta_groups_brocc,
+#             "/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/brocc_mediation_Rfiles/inputs/meta_groups_brocc.txt",
+#             sep = "\t")
+
+```
+
+
+```{r revise groups, eval=F}
+med_input <- med_input %>%
+  mutate(group_numb = case_when(group == "A" ~ 1,
+         group == "B" ~ 2,
+         group == "C" ~ 3))
+
+
+```
+
+```{r enterotypes?}
+## see if there are enterotypes with these groupings
+table(med_input$group)
+samp_numbs <- count(med_input, group)
+# group C is lowest but ok for now
+
+## clean up and calculate sums and proportions
+med_input_taxgroups_med <- med_input %>% 
+  column_to_rownames("subject_id") %>%
+  dplyr::select(-c("group_numb", contains("sum"), contains("diet"))) %>%
+  mutate(Other = dplyr::select(., -c("Bacteroides", "Prevotella_9", contains("Ruminococcus"), "group")) %>% rowSums()) %>%
+  mutate(Rumino_sum = dplyr::select(., contains("Ruminococcus")) %>% rowSums())
+
+med_input_taxsummed <- subset(med_input_taxgroups_med, select = c(Bacteroides, Prevotella_9, Rumino_sum, Other, group))
+
+med_input_taxgroups <- med_input_taxsummed %>%
+  group_by(group) %>%
+  summarise(across(everything(), sum, na.rm = TRUE)) %>%
+  column_to_rownames("group")
+
+med_prop_taxgroups <- prop.table(as.matrix(med_input_taxgroups), margin = 1) %>%
+  as.data.frame() %>%
+  rownames_to_column("group") %>%
+  rename(Ruminoccocus = Rumino_sum) %>%
+  gather("taxa", "proportion", -group)
+
+# reorder factors
+med_prop_taxgroups$taxa <- factor(med_prop_taxgroups$taxa, 
+                                    levels=c('Bacteroides', 'Prevotella_9', 
+                                             'Ruminoccocus', 'Other'))
+# set pallete
+pal <- c(brewer.pal(n = 3, name = "Dark2"), "grey")
+
+# graph
+ggplot(med_prop_taxgroups, aes(fill = taxa, y = proportion, x = group)) + 
+  geom_bar(position = 'stack', stat = 'identity') +
+  scale_fill_manual(values = pal)
+
+
+# ggsave("props_enterotype.png",
+#        dpi = 300, height = 5, width = 6)
+
+
+```
+
+- check if e.g., total fiber is associated with groupings
+```{r model Y ~ M, cluster group ~ diet}
+# plot of fiber in each group
+ggplot(data = med_input, aes(x = group,
+                             y = diet_TotFib_g)) +
+  geom_boxplot()
+# density plot of total fiber
+ggplot(data = med_input, aes(x = diet_TotFib_g)) +
+  geom_density()
+
+# plot of SFN in each group
+ggplot(data = med_input, aes(x = group,
+                             y = sum_SFN)) +
+  geom_boxplot()
+
+
+model.M <- lm(diet_TotFib_g ~ group, data = med_input)
+summary(model.M)
+
+model.M <- lm(sum_SFN ~ group, data = med_input)
+summary(model.M)
+
+```
+
+- trouble shoot model Y to choose optimal model
+```{r model Y ~ X + M, SFN ~ cluster group + diet}
+model.Y <- lm(log(sum_SFN+1) ~ group + diet_TotFib_g, data = med_input)
+summary(model.Y)
+
+model.Y.1 <- glm(log(sum_SFN+1) ~ group + diet_TotFib_g, data = med_input,
+                 family = Gamma)
+summary(model.Y.1)
+
+model.Y.2 <- glm(log(sum_SFN+1) ~ group + diet_TotFib_g, med_input, 
+                   family = inverse.gaussian(link = "log"))
+summary(model.Y.2)
+
+AIC(model.Y, model.Y.1, model.Y.2) # lm is the one
+
+
+```
+
+```{r test a mediation}
+med_input_l <- med_input %>%
+        dplyr::mutate(sfn_trans = log(med_input[[SFN_list[1]]] + 1),
+                      quarts = ntile(med_input[[diet_compnts[1]]], 4)) %>%
+  column_to_rownames("subject_id")
+med_input_l$group <- as.factor(med_input_l$group)
+
+# set models
+model.M <- lm(diet_Chol_mg ~ group,
+                    med_input_l)
+summary(model.M)
+model.Y <- lm(sfn_trans ~ group + diet_Chol_mg,
+                    med_input_l)
+summary(model.Y)
+      
+# mediate
+results <- mediate(model.M, model.Y, 
+                         treat = "group", 
+                         mediator = "diet_Chol_mg",
+                         control.value = "A", treat.value = "B", # lowest and highest quartiles
+                         boot = TRUE, sims = 500)
+
+summary(results)
+
+
+```
+
+# test model 0: which groups vary with SFN?
+```{r model 0 test}
+# loop through all
+out <- data.frame(matrix(ncol = 1, nrow = 0))
+colnames(out) <- c("name")
+long <- c()
+j <- 1
+for (i in 1:length(SFN_list)) {
+  input <- data.frame("sfn" = med_input[[SFN_list[i]]], 
+                      "group" = med_input$group,
+                      "subject_id" = med_input$subject_id)
+  lm <- summary(lm(sfn ~ group, data = input))
+  long[[SFN_list[i]]] <- as.data.frame(lm$coefficients)
+  if (lm$coefficients[2,4] <= 0.05 | lm$coefficients[3,4] <= 0.05) {
+    out[j,1] <- SFN_list[i]
+    j <- j + 1
+  }
+}
+
+out
+# ok so none of these vary over group, but sfn_nit is the closest to being significant
+# also these are lms so not pairwise comparisons
+
+```
+
+
+```{r mediation loop}
+# Use list_sfn and diet_compnts as the list of dietary components
+# make an output file
+med_res <- c()
+pvals_med <- c()
+exp_res_med <- c()
+SFN_list <- c("sum_SFN", "sum_SFN_NIT", "sum_SFN_Tot", "sum_SFN_Cys",
+              "sum_SFN_NAC", "sum_SFN_CG", "sum_SFN_GSH", "sum_SFN_NIT")
+# list_combos <- data.frame(sfns = c(rep("sum_SFN", nrow(out)),
+#                                    rep("sum_SFN_NIT", nrow(out)),
+#                                    rep("sum_SFN_Tot", nrow(out))),
+#                           diet = out$name)
+# list_groups <- unique(med_input$group)
+
+for (a in 1:length(diet_compnts)) {
+    for (f in 1:length(SFN_list)) {
+      tryCatch({
+      # add quartiles for each dietary component that will be used
+      # transform ASV abundance and transform SFN abundance
+      med_input_l <- med_input %>%
+        dplyr::mutate(sfn_trans = log(med_input[[SFN_list[f]]] + 1),
+                      quarts = med_input[[diet_compnts[a]]]) %>%
+                      # quarts = ntile(med_input[[diet_compnts[a]]], 4)) %>%
+  column_to_rownames("subject_id")
+      med_input_l$group <- as.factor(med_input_l$group)
+      
+      # set models
+      model.M <- lm(quarts ~ group,
+                    med_input_l)
+      model.Y <- lm(sfn_trans ~ quarts + group,
+                    med_input_l)
+      
+      # mediate
+      resultsAB <- mediate(model.M, model.Y, 
+                         treat = "group", 
+                         mediator = "quarts",
+                         control.value = "A", treat.value = "B", # lowest and highest quartiles
+                         boot = TRUE, sims = 500)
+      resultsAC <- mediate(model.M, model.Y,
+                         treat = "group",
+                         mediator = "quarts",
+                         control.value = "A", treat.value = "C", # lowest and highest quartiles
+                         boot = TRUE, sims = 500)
+      resultsBC <- mediate(model.M, model.Y,
+                         treat = "group",
+                         mediator = "quarts",
+                         control.value = "B", treat.value = "C", # lowest and highest quartiles
+                         boot = TRUE, sims = 500)
+      
+      # save results
+      exp_res_med[[paste(SFN_list[f], diet_compnts[a], "_AB")]] <- resultsAB
+      exp_res_med[[paste(SFN_list[f], diet_compnts[a], "_BC")]] <- resultsBC
+      exp_res_med[[paste(SFN_list[f], diet_compnts[a], "_AC")]] <- resultsBC
+      modsumAB <- summary(resultsAB)
+      modsumBC <- summary(resultsBC)
+      modsumAC <- summary(resultsAC)
+      pvals_med[[paste(SFN_list[f], diet_compnts[a], "_AB")]] <- list(ACME_pval_AB = modsumAB$d.avg.p,
+                                                               ADE_pval_AB = modsumAB$z.avg.p,
+                                                               prop_mediated_pval_AB = modsumAB$n.avg.p)
+      pvals_med[[paste(SFN_list[f], diet_compnts[a], "_BC")]] <- list(ACME_pval_BC = modsumBC$d.avg.p,
+                                                               ADE_pval_BC = modsumBC$z.avg.p,
+                                                               prop_mediated_pval_BC = modsumBC$n.avg.p)
+      pvals_med[[paste(SFN_list[f], diet_compnts[a], "_AC")]] <- list(ACME_pval_AC = modsumAC$d.avg.p,
+                                                               ADE_pval_AC = modsumAC$z.avg.p,
+                                                               prop_mediated_pval_AC = modsumAC$n.avg.p)},
+      error = function(e){cat("ERROR :",conditionMessage(e), "\n")})
+      
+      if (modsumAB$d.avg.p <= 0.2) {
+        coeff_tab <- list(ACME_est = modsumAB$d.avg,
+                          ACME_pval = modsumAB$d.avg.p,
+                          ADE_est = modsumAB$z.avg,
+                          ADE_pval = modsumAB$z.avg.p,
+                          prop_mediated_est = modsumAB$n.avg,
+                          prop_mediated_pval = modsumAB$n.avg.p)
+        
+        med_res[[paste(SFN_list[f], diet_compnts[a], "_AB")]] <- coeff_tab
+        
+        if (modsumBC$d.avg.p <= 0.2) {
+          coeff_tab <- list(ACME_est = modsumBC$d.avg,
+                          ACME_pval = modsumBC$d.avg.p,
+                          ADE_est = modsumBC$z.avg,
+                          ADE_pval = modsumBC$z.avg.p,
+                          prop_mediated_est = modsumBC$n.avg,
+                          prop_mediated_pval = modsumBC$n.avg.p)
+        
+        med_res[[paste(SFN_list[f], diet_compnts[a], "_BC")]] <- coeff_tab
+        
+        if (modsumAC$d.avg.p <= 0.2) {
+          coeff_tab <- list(ACME_est = modsumAC$d.avg,
+                          ACME_pval = modsumAC$d.avg.p,
+                          ADE_est = modsumAC$z.avg,
+                          ADE_pval = modsumAC$z.avg.p,
+                          prop_mediated_est = modsumAC$n.avg,
+                          prop_mediated_pval = modsumAC$n.avg.p)
+        
+        med_res[[paste(SFN_list[f], diet_compnts[a], "_AC")]] <- coeff_tab
+        
+        }
+        }
+        
+      } else { print(paste(SFN_list[f], ",",
+                           diet_compnts[a], "are NOT significant"))}
+      
+      # counters
+      f <- f + 1
+      }
+    a <- a + 1
+    }
+
+
+
+```
+
+## Examine results
+```{r which SFN-taxa-diet combos are potential mediations}
+signif <- do.call(rbind.data.frame, pvals_med[names(med_res)]) %>%
+  rownames_to_column("names(med_res)")
+signif
+
+# write.table(signif, "../outputs/signif_meds_pred2.txt")
+
+# after adding insoluble fiber, same answer
+
+```
+
+one significant association, indirect effect
+
+## graph the results
+```{r graphing one result}
+## sum_SFN_NIT diet_OCarb_g _AB
+
+# select and plot mediation result for this combo
+med_res$`sum_SFN_NIT diet_OCarb_g _AB`
+# it's not great beyond the ACME
+plot(summary(exp_res_med$`sum_SFN_NIT diet_OCarb_g _AB`))
+
+# select these variables for plotting
+regrplot <- med_input %>% dplyr::select(group, sum_SFN_NIT, diet_OCarb_g)
+
+# graph model.M
+model.M <- lm(diet_OCarb_g ~ group, med_input)
+summary(model.M)
+# group B almost significant
+
+modM <- ggplot(data = regrplot, aes(x = group, 
+                                    y = diet_OCarb_g)) +
+  geom_boxplot(aes(group = group)) +
+  labs(title = "Microbiome group ~ Other Carbs", y = "Other Carbs (g)")
+modM
+
+# graph model.Y
+model.Y <- lm(log(sum_SFN_NIT+1) ~ diet_OCarb_g + group, med_input)
+summary(model.Y)
+
+modY_ASV <- ggplot(data = regrplot, aes(x = group, 
+                                        y = log(sum_SFN_NIT+1))) +
+  geom_boxplot(aes(group = group)) +
+  ggtitle("SFN NIT ~ Microbiome group")
+
+modY_fib <- ggplot(data = regrplot, aes(x = diet_OCarb_g, y = log(sum_SFN_NIT+1), color = group)) +
+  geom_point() +
+  stat_smooth(method = "lm", se = TRUE) +
+  labs(title = "SFN NIT ~ Other Carbs",
+       x = "Other Carbs (g)")
+
+ggarrange(modM, modY_ASV, modY_fib,
+          nrow = 1, ncol = 3)
+
+# ggsave("clustermediation.png",
+#        height = 5, width = 15, dpi = 300)
+
+```
+
+
+## save image chunk 
+```{r save env, eval = F}
+save.image("/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/brocc_mediation_Rfiles/cluster_method/brocc_clustermediation.RData")
+
+```

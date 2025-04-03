@@ -1,0 +1,17 @@
+"names(med_res)" "ACME_pval" "ADE_pval" "prop_mediated_pval"
+"1" "Terrisporobacter diet_TotSolFib_g sum_SFN_CG" 0.092 0.436 0.62
+"2" "Oscillibacter diet_BetaCaro_mcg sum_SFN_CG" 0.068 0.372 0.188
+"3" "Bifidobacterium diet_BetaCaro_mcg sum_SFN_CG" 0.012 0.168 0.304
+"4" "Roseburia diet_BetaCaro_mcg sum_SFN_CG" 0.1 0.66 0.836
+"5" "CAG.56 diet_Vit_B1_mg sum_SFN_CG" 0.032 0.596 0.376
+"6" "X.Ruminococcus..torques.group diet_Vit_B6_mg sum_SFN_CG" 0.016 0.288 0.036
+"7" "Parasutterella diet_Vit_B6_mg sum_SFN_CG" 0.088 0.584 0.38
+"8" "UCG.003 diet_Vit_B6_mg sum_SFN_CG" 0.076 0.112 0.104
+"9" "GCA.900066575 diet_Vit_B6_mg sum_SFN_CG" 0.004 0.792 0.42
+"10" "GCA.900066575 diet_Fol.DFE_mcg_DFE sum_SFN_CG" 0.088 0.72 0.508
+"11" "Terrisporobacter diet_TotSolFib_g sum_SFN_GSH" 0.096 0.204 NA
+"12" "Bifidobacterium diet_BetaCaro_mcg sum_SFN_GSH" 0.056 0.472 NA
+"13" "Roseburia diet_BetaCaro_mcg sum_SFN_GSH" 0.084 0.288 0.344
+"14" "X.Ruminococcus..torques.group diet_Vit_B6_mg sum_SFN_GSH" 0.096 0.996 NA
+"15" "GCA.900066575 diet_Vit_B6_mg sum_SFN_GSH" 0.056 0.364 NA
+"16" "Lachnospiraceae.UCG.004 diet_OCarb_g sum_SFN_GSH" 0.088 0 0.088
