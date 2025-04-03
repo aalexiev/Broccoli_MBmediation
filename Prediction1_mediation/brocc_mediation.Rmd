@@ -2,7 +2,7 @@
 title: "brocc_mediation"
 author: "Alexandra Alexiev"
 date: "2024-07-09"
-output: html_document
+output: pdf_document
 editor_options: 
   chunk_output_type: console
 ---
@@ -248,7 +248,7 @@ pvals_model.0_lms <- t(as.data.frame(pvals_model.0_lms))
 # want to save insoluble fiber to show coauthors and maybe reviewers
 justinsols <- as.data.frame(pvals_model.0_lms) %>%
   filter(grepl("diet_TotInsolFib_g", rownames(pvals_model.0_lms)))
-write.table(justinsols, "../outputs/insol_pvals.txt", quote = F)
+# write.table(justinsols, "../outputs/insol_pvals.txt", quote = F)
 
 hist(pvals_model.0_lms, breaks = 20)
 abline(v = quantile(pvals_model.0_lms, 0.05))
