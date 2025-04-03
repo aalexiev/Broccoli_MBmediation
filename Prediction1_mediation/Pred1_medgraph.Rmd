@@ -2,7 +2,7 @@
 title: "Pred1 mediation graph"
 author: "Alexandra Alexiev"
 date: "2025-01-15"
-output: pdf_document
+output: html_document
 editor_options: 
   chunk_output_type: console
 ---
