@@ -1,0 +1,2 @@
+"names(med_res)" "ACME_pval" "ADE_pval" "prop_mediated_pval"
+"1" "sum_SFN_NIT diet_Vit_B6_mg" 0.184 0.432 0.752
