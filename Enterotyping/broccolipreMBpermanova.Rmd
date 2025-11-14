@@ -538,6 +538,7 @@ plot(rda_broccA)
 
 ```
 
+
 ```{r broccoli permanova best model group A}
 Perm_broccA <- adonis2(MB_asvtab_broccA ~ bmi + diet_Alc_g, 
                             data = meta_groupA_brocc,
@@ -650,6 +651,7 @@ p.adjust(Perm_groupC$`Pr(>F)`, method = "fdr")
 #             sep = "\t")
 
 ```
+
 
 ## save image chunk 
 ```{r save env, eval = F}
