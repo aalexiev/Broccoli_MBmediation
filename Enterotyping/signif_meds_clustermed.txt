@@ -1,2 +1,0 @@
-"names(med_res)" "ACME_pval_AB" "ADE_pval_AB" "prop_mediated_pval_AB"
-"1" "sum_SFN_NIT diet_OCarb_g _AB" 0.148 0.02 0.188
