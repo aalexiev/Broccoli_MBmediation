@@ -61,19 +61,34 @@ sum(!complete.cases(MB_asvtab))
 sum(!complete.cases(SFN_NIT_tab))
 # yes
 
-# for now test with just SFN_NIT_cumulative data
+# for now test with SFN_NIT_cumulative data
 feat_tab <- MB_asvtab %>%
   inner_join(SFN_NIT_tab[c("subject_id", "sum_SFN_NIT")], by = "subject_id") %>%
   column_to_rownames("subject_id")
 
 ```
 
+## graph the distribution of SFN-NIT and a test taxon
+These were logged in the optimal model we used in the mediation analysis so we intend to do that here for the random forest regressions as well.
+```{r SFN-NIT and test taxon graphs}
+hist(feat_tab$sum_SFN_NIT) # non-normal
+hist(feat_tab$Dialister) # also non-normal
+
+hist(log(feat_tab$sum_SFN_NIT)) # more normal
+hist(log(feat_tab$Dialister)) # also more normal
+
+# let's just log the whole matrix (with pseudocount), as we did in the mediation analysis
+feat_tabl <- log(feat_tab + 1)
+
+
+```
+
 ## Split into train and validation set of data
 ```{r train and validation set split}
 # Training Set : Validation Set = 70 : 30 (random)
-train <- sample(nrow(feat_tab), 0.7*nrow(feat_tab), replace = FALSE)
-TrainSet <- feat_tab[train,]
-ValidSet <- feat_tab[-train,]
+train <- sample(nrow(feat_tabl), 0.7*nrow(feat_tabl), replace = FALSE)
+TrainSet <- feat_tabl[train,]
+ValidSet <- feat_tabl[-train,]
 summary(TrainSet)
 summary(ValidSet)
 
@@ -105,31 +120,35 @@ ggplot(ImpData, aes(x=Var.Names, y=`%IncMSE`)) +
     panel.border = element_blank(),
     axis.ticks.y = element_blank()
   )
+# since some of these are negative make sure later we use absolute valyue MSE greater than 1
 
 # ggsave("import_graph_trainSFNNIT.png",
 #        dpi = 300, height = 13,
 #        width = 8)
 
 # calculate RMSE of train data
-sqrt(model1$mse[length(model1$mse)]) # want to be low
+sqrt(model1$mse[length(model1$mse)]) 
+# 0.7410906
+# want to be low; SFN-NIT logged ranges up to 5
 
 # calculate RMSE of test data
 predValues <- predict(model1, ValidSet)
 sqrt(mean((ValidSet$sum_SFN_NIT - predValues)^2))
-
-# ok rmse
+# 0.7835532
 
 R2 <- 1 - (sum((ValidSet$sum_SFN_NIT-predValues)^2)/sum((ValidSet$sum_SFN_NIT-mean(ValidSet$sum_SFN_NIT))^2))
-# not a great fit for data
-
-# can't do more mtry's because it's already 37 (and there are 38 observations)
-# couldn't make it a better fit by changing ntree
+# -0.612301
+# not a great fit for data? but also found an article that describes that it *could* 
+# be negative because we used different sets of data to train and test so the sums of 
+# squares are not exactly comparable; this is probably not the best metric for fit then
+# https://towardsdatascience.com/explaining-negative-r-squared-17894ca26321/ 
 
 # find number of trees that produced lowest test MSE
-which.min(model1$mse) # 1
+which.min(model1$mse) # 25
 
 # RMSE of best model
 sqrt(model1$mse[which.min(model1$mse)])
+# 0.7045018; pretty good
 
 #plot the test MSE by number of trees
 plot(model1)
@@ -137,16 +156,16 @@ plot(model1)
 ```
 
 ```{r run full model}
-model2 <- randomForest(formula = sum_SFN_NIT ~ . , data = feat_tab, importance = TRUE)
+model2 <- randomForest(formula = sum_SFN_NIT ~ . , data = feat_tabl, importance = TRUE)
 model2 # not much different than train model
 
 # find number of trees that produced lowest test MSE
 which.min(model2$mse)
-# 93 trees best, but this changes every time I run it
+# 126 trees best, but this changes every time I run it
 
 # RMSE of best model
-sqrt(model1$mse[which.min(model2$mse)])
-# 31.3 is best mse
+sqrt(model2$mse[which.min(model2$mse)])
+# 0.7368217 is best mse
 
 #plot the test MSE by number of trees
 plot(model2)
@@ -181,29 +200,30 @@ optimize model:
 - improve: The amount that the out-of-bag error needs to improve by to keep increasing the step factor.
 ```{r optimize/tune the rf model}
 model_tuned <- tuneRF(
-               x=feat_tab[,-1], #define predictor variables
-               y=feat_tab$sum_SFN_NIT, #define response variable
+               x=feat_tabl[,-112], #define predictor variables
+               y=feat_tabl$sum_SFN_NIT, #define response variable
                ntreeTry=500,
                mtryStart=3, 
                stepFactor=1.5,
                improve=0.01,
                trace=FALSE #don't show real-time progress
                )
-# 111 predictors at each split will give best OOB
+# 3 predictors (mtry) at each split will give best OOB
 
 ```
 
 ```{r rerun rf model with new information about best number of predictors}
-model3 <- randomForest(formula = sum_SFN_NIT ~ . , data = feat_tab, importance = TRUE, mtry = 111)
+# run model with best trees
+model3 <- randomForest(formula = sum_SFN_NIT ~ . , data = feat_tabl, 
+                       importance = TRUE, ntree = 500, mtry = 4)
 model3 # not much different than train model
-
-# find number of trees that produced lowest test MSE
-which.min(model3$mse)
-# 105 trees best, but this changes every time I run it
 
 # RMSE of best model
 sqrt(model3$mse[which.min(model3$mse)])
-# 27.8 is best rmse
+# 0.7108695
+# compare to range of Dialister abundance for e.g.
+range(feat_tabl$Dialister)
+# so the error is not too bad
 
 #plot the test MSE by number of trees
 plot(model3)
@@ -211,29 +231,25 @@ plot(model3)
 # Get variable importance from the model fit
 ImpData <- as.data.frame(importance(model3)) %>%
   rename_at('%IncMSE', ~'percIncMSE') %>%
-  dplyr::filter(percIncMSE > 0)
+  dplyr::filter(percIncMSE > 1)
 ImpData$Var.Names <- row.names(ImpData)
 
-ggplot(ImpData, aes(x=Var.Names, y=`percIncMSE`)) +
+mod3Impgraph <- ggplot(ImpData, aes(x=Var.Names, y=`percIncMSE`)) +
   geom_segment( aes(x=Var.Names, xend=Var.Names, y=0, yend=`percIncMSE`), color="skyblue") +
   geom_point(aes(size = IncNodePurity), color="blue", alpha=0.6) +
   theme_light() +
   coord_flip() +
-  theme(
-    legend.position="bottom",
+  theme(legend.position="bottom",
     panel.grid.major.y = element_blank(),
     panel.border = element_blank(),
-    axis.ticks.y = element_blank()
-  )
+    axis.ticks.y = element_blank(),
+    text = element_text(size = 14)) +
+  labs(y = "Percent increase in MSE", x = "", size = "Increase in Node Purity")
+mod3Impgraph
 
 # ggsave("import_graph_optimtestmod_SFNNIT.png",
 #        dpi = 300, height = 9,
 #        width = 8)
-
-# another verison of importance plot
-varImpPlot(model3, 
-           sort=FALSE, 
-           main="Variable Importance Plot")
 
 
 ```
@@ -244,35 +260,108 @@ predValues <- predict(model3, ValidSet)
 R2 <- 1 - (sum((ValidSet$sum_SFN_NIT-predValues)^2)/sum((ValidSet$sum_SFN_NIT-mean(ValidSet$sum_SFN_NIT))^2))
 R2
 # pretty ok
+# 0.7452101
 
 
 ```
 
 ```{r graph and linear regression of dialister and SFN-NIT}
-dialister_NIT_graph <- feat_tab %>%
-  dplyr::select(c("Dialister", "sum_SFN_NIT"))
+# list the taxa with an perincmse higher than 2 and node purity inc higher than 0.1
+top_tax <- ImpData %>%
+  dplyr::filter(percIncMSE > 2 & IncNodePurity > 0.1)
+# note this uses logged tax abundances and SFN
+toptax_graph <- feat_tabl %>%
+  dplyr::select(c(rownames(top_tax), "sum_SFN_NIT"))
 
 # stats
-summary(lm(sum_SFN_NIT ~ Dialister, data = dialister_NIT_graph))
-# Adjusted R-squared:  0.1769
+summary(lm(sum_SFN_NIT ~ Alistipes, data = toptax_graph)) # nope
+summary(lm(sum_SFN_NIT ~ Dialister, data = toptax_graph)) # nope
+summary(lm(sum_SFN_NIT ~ Lachnospiraceae.UCG.009, data = toptax_graph)) # almost
+summary(lm(sum_SFN_NIT ~ Oscillospira, data = toptax_graph)) # yes
+summary(lm(sum_SFN_NIT ~ f_NA_ASV156, data = toptax_graph)) # yes
+
+# make a little table of these to add as annotations to graph later
+lachno <- summary(lm(sum_SFN_NIT ~ Lachnospiraceae.UCG.009, data = toptax_graph)) # almost
+osci <- summary(lm(sum_SFN_NIT ~ Oscillospira, data = toptax_graph)) # yes
+NAasv <- summary(lm(sum_SFN_NIT ~ f_NA_ASV156, data = toptax_graph)) # yes
+stat_tab <- data.frame(Taxon = c(rownames(lachno$coefficients)[2],
+                                 rownames(osci$coefficients)[2],
+                                 rownames(NAasv$coefficients)[2]),
+                       Est = round(c(lachno$coefficients[2,1],
+                                 osci$coefficients[2,1],
+                                 NAasv$coefficients[2,1]), digits = 1),
+                       Error = round(c(lachno$coefficients[2,2],
+                                 osci$coefficients[2,2],
+                                 NAasv$coefficients[2,2]), digits = 2),
+                       pval = round(c(lachno$coefficients[2,4],
+                                 osci$coefficients[2,4],
+                                 NAasv$coefficients[2,4]), digits = 2))
+# turn into text object for.graph
+text_annot <- data.frame(label = c(paste0("Estimate = ", stat_tab$Est[1],
+                                                " +/- ", stat_tab$Error[1], "\n",
+                                                "p = ", stat_tab$pval[1]),
+                                   paste0("Estimate = ", stat_tab$Est[2],
+                                                " +/- ", stat_tab$Error[2], "\n",
+                                                "p = ", stat_tab$pval[2]),
+                                   paste0("Estimate = ", stat_tab$Est[3],
+                                                " +/- ", stat_tab$Error[3], "\n",
+                                                "p = ", stat_tab$pval[3])),
+                         Taxon = stat_tab$Taxon)
+
+# change format for graphing
+toptax_graph_long <- toptax_graph %>%
+  tidyr::gather(key = "Taxon", value = "abund", -sum_SFN_NIT)
 
 # graph
-library(ggtext)
-dianit_plot <- ggplot(data = dialister_NIT_graph,
-                       aes(x = Dialister, y = sum_SFN_NIT)) +
+taxnit_plot <- ggplot(data = toptax_graph_long,
+                       aes(x = abund, y = sum_SFN_NIT)) +
   geom_point() +
   geom_smooth(method = 'lm', color = "black") +
-  labs(x = "*Dialister* abundance", y = "cumulative SFN-nitrile in urine") +
-  theme(text = element_text(size = 14),
-        axis.title.x = ggtext::element_markdown())
-dianit_plot
-# ggsave("dialisterNIT_lmplot.jpg", dianit_plot,
-#        dpi = 300, width = 5, height = 5)
+  labs(x = "Log taxon abundance", y = "log cumulative SFN-nitrile in urine") +
+  theme(text = element_text(size = 14)) +
+  facet_wrap("Taxon")
+
+taxnit_plot
+
+# ggsave("TOP5NIT_lmplot.jpg", taxnit_plot,
+#        dpi = 300, width = 7, height = 5)
+
+# different version of graph
+# change format for graphing
+toptax_graph_long2 <- toptax_graph %>%
+  dplyr::select(c("Oscillospira", "f_NA_ASV156", "Lachnospiraceae.UCG.009", "sum_SFN_NIT")) %>%
+  tidyr::gather(key = "Taxon", value = "abund", -sum_SFN_NIT)
+# graph
+taxnit_plot2 <- ggplot(data = toptax_graph_long2,
+                       aes(x = abund, y = sum_SFN_NIT)) +
+  geom_point() +
+  geom_smooth(method = 'lm', color = "black") +
+  labs(x = "Log taxon abundance", y = "log cumulative SFN-nitrile in urine") +
+  theme(text = element_text(size = 14)) +
+  facet_wrap("Taxon") +
+  geom_text(data = text_annot, mapping = aes(x = 2.5, y = 2, label = label))
+
+taxnit_plot2
+
+# ggsave("TOP3NIT_lmplot.jpg", taxnit_plot2,
+#        dpi = 300, width = 9, height = 4)
 
 
 ```
 
+```{r make a paneled figure of importance graph and regressions}
+library(ggpubr)
+implm <- ggarrange(mod3Impgraph, taxnit_plot2,
+                   nrow = 2, ncol = 1,
+                   heights = c(8, 4),
+                   labels = c("A", "B"))
+implm
 
+# ggsave("imp_and_lm_rfplot.jpg", implm,
+#        dpi = 300, width = 9, height = 12)
+
+
+```
 
 ## random forest model to test whether the presence or absence of certain taxa is associated with cumulative SFN_NIT
 
