@@ -1,0 +1,18 @@
+SFN type	diet component term	p-value	
+SFN	Alcohol	0.04057789	sum_SFN...diet_Alc_g.diet
+SFN	Alcohol^2	0.041217022	sum_SFN...diet_Alc_g.diet2
+SFN	Vitamin B1	0.011506227	sum_SFN...diet_Vit_B1_mg.diet
+SFN	Vitamin B1^2	0.008644618	sum_SFN...diet_Vit_B1_mg.diet2
+SFN	Vitamin B1^3	0.006931764	sum_SFN...diet_Vit_B1_mg.diet3
+SFN	Vitamin B1^4	0.006240444	sum_SFN...diet_Vit_B1_mg.diet4
+SFN	Iron	0.013854151	sum_SFN...diet_Iron_mg.diet
+SFN	Iron^2	0.015672449	sum_SFN...diet_Iron_mg.diet2
+SFN	Iron^3	0.018110412	sum_SFN...diet_Iron_mg.diet3
+SFN	Iron^4	0.021032034	sum_SFN...diet_Iron_mg.diet4
+Total SFN	Alcohol	0.003884531	sum_SFN_Tot...diet_Alc_g.diet
+Total SFN	Alcohol^2	0.010479773	sum_SFN_Tot...diet_Alc_g.diet2
+Total SFN	Alcohol^3	0.044113371	sum_SFN_Tot...diet_Alc_g.diet3
+Total SFN	Folate	0.038037784	sum_SFN_Tot...diet_Fol.DFE_mcg_DFE.diet
+Total SFN	Folate^2	0.035250927	sum_SFN_Tot...diet_Fol.DFE_mcg_DFE.diet2
+Total SFN	Folate^3	0.037257742	sum_SFN_Tot...diet_Fol.DFE_mcg_DFE.diet3
+Total SFN	Folate^4	0.04123304	sum_SFN_Tot...diet_Fol.DFE_mcg_DFE.diet4
