@@ -175,7 +175,8 @@ fviz_nbclust(MB_asvtab, kmeans, method = 'silhouette')
 # 2 is actualy the optimal clustering for the ASV matrix
 
 ## without alfalfa eaters (only brocc)
-fviz_nbclust(MB_asvtab_filt, kmeans, method = 'silhouette')
+clust <- fviz_nbclust(MB_asvtab_filt, kmeans, k.max = 5, method = 'silhouette')
+clust
 
 # 3 is actualy the optimal clustering for the ASV matrix
 
@@ -542,11 +543,20 @@ modY_ASV <- ggplot(data = regrplot, aes(x = group,
   geom_boxplot(aes(group = group)) +
   ggtitle("SFN NIT ~ Microbiome group")
 
+library(RColorBrewer)
 modY_fib <- ggplot(data = regrplot, aes(x = diet_OCarb_g, y = log(sum_SFN_NIT+1), color = group)) +
   geom_point() +
+  theme_classic() +
   stat_smooth(method = "lm", se = TRUE) +
-  labs(title = "SFN NIT ~ Other Carbs",
-       x = "Other Carbs (g)")
+  labs(x = "Other Carbs (g)",
+       y = "SFN-NIT quantity\n(ln(cumulative SFN-NIT + 1)",
+       color = "Group") +
+  scale_colour_brewer(palette = "Dark2") +
+  theme(text=element_text(size=16))
+modY_fib
+
+# ggsave("OtherCarb_graph.tiff",
+#        height = 5, width = 6, dpi = 300)
 
 ggarrange(modM, modY_ASV, modY_fib,
           nrow = 1, ncol = 3)
