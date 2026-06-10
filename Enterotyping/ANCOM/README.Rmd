@@ -30,6 +30,7 @@ library(dplyr)
 library(tibble)
 library(ggplot2)
 # source the ancom code, downloaded from: https://github.com/mech3132/MSC_code/blob/master/ANCOM_updated_code_MYC.R
+# which is derived from: https://github.com/mka2136/lt_microbiome/blob/master/inputs/ANCOM_updated_code.R
 source("~/Documents/Reference_Info/ANCOM_MYC/ANCOM_updated_code_MYC_AA.R")
 # set seed so stats like permanova are reproducible
 set.seed(3)
