@@ -1,0 +1,195 @@
+---
+title: "brocc_ancom"
+author: "Alexandra Alexiev"
+date: "2024-12-03"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+# knit options for whole doc. I will add in specific chunks when I don't want this to be the case
+knitr::opts_chunk$set(echo = TRUE, # show code
+                      eval = TRUE, # do not run chunks when knitting
+                      include = TRUE, # include chunk input in final doc
+                      warning = FALSE, # do not show warnings in final doc
+                      message = FALSE, # do not show messages from code in final doc
+                      collapse = TRUE, # when possible, do put multiple outputs in one block
+                      dpi = 300, # fig resolution
+                      fig.dim = c(9, 5), # the default figure dimensions
+                      out.width = "98%", # the default figure output width
+                      out.height = "98%") # the default figure output height
+
+```
+
+## Housekeeping
+
+```{r libraries and paths}
+# libraries
+library(dplyr)
+library(tibble)
+library(ggplot2)
+# source the ancom code, downloaded from: https://github.com/mech3132/MSC_code/blob/master/ANCOM_updated_code_MYC.R
+source("~/Documents/Reference_Info/ANCOM_MYC/ANCOM_updated_code_MYC_AA.R")
+# set seed so stats like permanova are reproducible
+set.seed(3)
+
+# to knit an Rmd file, you need explicit file paths typed out, so I created these objects as shortcuts so I could call the object for commonly used file paths instead of retyping the whole thing each time
+home_dir <- "/Users/alexieva/Documents/Projects/Analysis/broccoli project/01_explAnalysis/brocc_microViz/"
+
+```
+
+```{r set working directory, eval=FALSE}
+# setwd() does not work when trying to knit .Rmd file so keep commented out and run in console
+setwd(home_dir)
+
+```
+
+```{r save data}
+load(paste0(home_dir, "brocc_ancom.RData"))
+
+```
+
+## load in data
+
+```{r load in data}
+ASV_tab <- read.table("input_lefse.txt", header = T) %>%
+  dplyr::rename(Sample.ID = "subject_id") %>%
+  dplyr::select(-group)
+
+meta <- read.table("justgrps_metadata.txt", header = T) %>%
+  dplyr::rename(Sample.ID = "subject_id")
+
+```
+
+```{r run ancom}
+# run ancom with parameters for no repeated data, no adjustment (so it'll use a KW test)
+comparison_test_grps <- ANCOM.main.myc(OTUdat = ASV_tab,
+                                      Vardat = meta,
+                                      adjusted = F,
+                                      repeated = F,
+                                      main.var = "group",
+                                      adj.formula = NULL,
+                                      repeat.var = NULL,
+                                      longitudinal = F,
+                                      random.formula = NULL,
+                                      multcorr = 2,
+                                      sig = 0.05,
+                                      prev.cut = 0.90)
+
+# This tells you if your data has a lot of zeroes/skew, as most microbial data do.
+# everything below the red line gets removed.
+comparison_test_grps$PLot.zeroes
+# This tells you which (colored) OTU's have a high effect size and significance
+comparison_test_grps$Plot.volcano
+comparison_test_grps$Plot.volcano.0.9
+# this helps you determine if the critical w was chosen correctly. We want the valley between a bimodal distribution, in theory.
+comparison_test_grps$Plot.critical.w
+# I think W=~75 is good since it is very stringent, especially with the clumping of the points in the previous plots.
+# ggsave("Wplot_groups.png",
+#        comparison_test_grps$Plot.critical.w,
+#        dpi = 300, height = 5, width = 10)
+# save(comparison_test_grps,
+#      file = "ANCOM_grps.RData",
+#      envir = .GlobalEnv)
+# write.table(comparison_test_grps$W.taxa,
+#             "ANCOMgrps_taxabunds.txt", sep="\t", quote=F)
+
+# to bring ancom object back in
+# load("ANCOM_grps.RData")
+
+
+```
+
+## graph volcano plot
+```{r}
+# load(file=paste0(work_dir,"02_hypothesisbasedanalsysis/ANCOM_lifeenv.RData"))
+
+# make a volcano plot showing the associated microbes
+W_frame <- comparison_test_grps$W.taxa %>%
+  dplyr::filter(detected_wcrit == T) %>%
+  mutate(Enriched = case_when(A_relAbund > B_relAbund ~ "A",
+                              B_relAbund > A_relAbund ~ "B"))
+
+# graph volcano plot
+volcano.plot <- ggplot(W_frame) +
+  geom_point(aes(x = W_f, y = W_stat, color = Enriched)) +
+  xlab("CLR F statistic (Effect size)") +
+  ylab("W statistic") +
+  labs(color = "Broccoli group") +
+  scale_color_manual(values = c("#56B4E9", "#CC79A7")) + 
+  geom_hline(mapping = aes(yintercept = 50), col = "red", lty = 2) + 
+  geom_vline(mapping = aes(xintercept = 10), col = "red", lty = 2)
+volcano.plot
+# ggsave("volcano_plot_color.png",
+#        volcano.plot, dpi = 400, width = 7, height = 5)
+
+
+```
+
+```{r graph abundances}
+abunds <- W_frame %>%
+  dplyr::select(c(otu.names, A_relAbund, B_relAbund)) %>%
+  gather(grping, abundance, A_relAbund:B_relAbund, factor_key=TRUE)
+
+abunds$grping <- gsub('_relAbund', '', abunds$grping)
+
+abund.plot <- ggplot(abunds, aes(x = otu.names, y = abundance, fill = grping)) +
+  geom_bar(position='dodge', stat='identity') +
+  xlab("Genus") +
+  ylab("Relative abundance") +
+  labs(fill = "Pre-treatment microbiome group") +
+  scale_fill_manual(values = c("darkgreen", "mediumpurple"))
+abund.plot
+# ggsave("abund.plot.png",
+#        abund.plot, dpi = 400, width = 7, height = 5)
+
+```
+
+Bacteroides makes sense because it's associated with enterotypes. Christensenalleae group is typically associated with lower obesity, check if B group has lower BMI
+```{r B group vs A group BMI?}
+full_meta <- read.table("~/Documents/Projects/Analysis/broccoli project/01_explAnalysis/brocc_randomforest/meta_groups_brocc.txt",
+                        header = T) %>%
+  filter(group != "C")
+
+summary(aov(bmi ~ group, full_meta))
+ggplot(aes(x = group, y = bmi), data = full_meta) +
+  geom_bar(position='dodge', stat='identity')
+
+```
+
+# what else could this be associated with?
+
+```{r optimize lm for group}
+# Stepwise Regression
+library(MASS)
+fit <- lm(group_numb ~ sex + race + age + weight_lb + bmi + diet_Chol_mg +         diet_SatFat_g + diet_Alc_g + diet_TotSolFib_g + diet_MonSac_g + diet_Disacc_g + diet_BetaCaro_mcg + diet_Vit_B1_mg + diet_Vit_B6_mg + diet_Fol.DFE_mcg_DFE + diet_Mang_mg + diet_Copp_mg + diet_TotFib_g + diet_OCarb_g + diet_Iron_mg, 
+          data = full_meta)
+step <- stepAIC(fit, direction="both")
+step$anova # display results
+
+# run optimal model
+fit_optim <- lm(group_numb ~ race + age + bmi + diet_Chol_mg + diet_SatFat_g + 
+    diet_TotSolFib_g + diet_MonSac_g + diet_BetaCaro_mcg + diet_Vit_B1_mg + 
+    diet_Fol.DFE_mcg_DFE + diet_Mang_mg + diet_Copp_mg + diet_TotFib_g + 
+    diet_Iron_mg, data = full_meta)
+summary(fit_optim)
+
+## left off: figure out how to graph these relationships
+## make a graph of group by age, race, bmi, diet_SatFat_g, diet_MonSac_g, diet_Vit_B1_mg, and diet_TotFib_g
+age <- ggplot(data = full_meta, aes(x = group_numb, y = age)) +
+  geom_bar(position='dodge', stat='identity')
+race <- ggplot(data = full_meta, aes(x = group_numb, y = race)) +
+  geom_bar(position='dodge', stat='identity')
+
+bmi <- ggplot(aes(x = group_numb, y = bmi), data = full_meta) +
+  geom_bar(position='dodge', stat='identity')
+
+```
+
+
+
+```{r load rdata file}
+save.image("brocc_microViz.RData")
+
+```
